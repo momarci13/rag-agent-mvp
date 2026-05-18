@@ -156,7 +156,7 @@ def run(
             elif tools.get("run_c") and code and lang == "c":
                 run_result = tools["run_c"](code)
                 run_result["code"] = code
-            state.artifacts.append({"type": "ds", "payload": run_result, "raw": code_md})
+            state.artifacts.append({"type": "ds", "payload": run_result, "raw": code_md, "iteration": state.iterations})
 
             # 3. CRITIQUE
             c = roles.critique(
@@ -174,6 +174,7 @@ def run(
             state.artifacts.append({
                 "type": "quant",
                 "payload": {"spec": spec.model_dump(), "backtest": bt_result},
+                "iteration": state.iterations,
             })
             c = roles.critique(
                 llm,
@@ -193,10 +194,12 @@ def run(
             full_tex = _assemble_tex(outline, sections_out)
             pdf_path = None
             if tools.get("latex_build"):
-                pdf_path = tools["latex_build"](full_tex)
+                rag_bib = _extract_bibtex_from_rag(rag)
+                pdf_path = tools["latex_build"](full_tex, rag_bib)
             state.artifacts.append({
                 "type": "writing",
                 "payload": {"tex": full_tex, "pdf": pdf_path, "outline": outline.model_dump()},
+                "iteration": state.iterations,
             })
             c = roles.critique(llm, full_tex[:3000])
 
@@ -213,6 +216,10 @@ def run(
 
         # Generate narrative + PDF report for the last artifact
         _attach_narrative_report(state.artifacts[-1], state, llm, tools)
+
+        # Feed accepted artifact back into RAG for KB expansion
+        if state.accepted:
+            _ingest_artifact_into_rag(state.artifacts[-1], state, rag)
 
     return state
 
@@ -356,7 +363,7 @@ def research_run(
             elif tools.get("run_c") and code and lang == "c":
                 run_result = tools["run_c"](code)
                 run_result["code"] = code
-            state.artifacts.append({"type": "ds", "payload": run_result, "raw": code_md})
+            state.artifacts.append({"type": "ds", "payload": run_result, "raw": code_md, "iteration": state.iterations})
             c = roles.critique(
                 llm,
                 f"Code:\n{code}\nstdout:\n{run_result.get('stdout','')[:1500]}"
@@ -370,6 +377,7 @@ def research_run(
             state.artifacts.append({
                 "type": "quant",
                 "payload": {"spec": spec.model_dump(), "backtest": bt_result},
+                "iteration": state.iterations,
             })
             c = roles.critique(llm, f"Strategy: {spec.model_dump_json()}\nBacktest: {bt_result}")
 
@@ -386,10 +394,14 @@ def research_run(
                 if result["uncited_claims"]:
                     print(f"[RESEARCH] Section '{sec.title}': {len(result['uncited_claims'])} uncited claims")
             full_tex = _assemble_tex(outline, sections_out)
-            pdf_path = tools["latex_build"](full_tex) if tools.get("latex_build") else None
+            pdf_path = None
+            if tools.get("latex_build"):
+                rag_bib = _extract_bibtex_from_rag(rag)
+                pdf_path = tools["latex_build"](full_tex, rag_bib)
             state.artifacts.append({
                 "type": "writing",
                 "payload": {"tex": full_tex, "pdf": pdf_path, "outline": outline.model_dump()},
+                "iteration": state.iterations,
             })
             c = roles.critique(llm, full_tex[:3000])
 
@@ -405,6 +417,10 @@ def research_run(
 
         # Generate narrative + PDF report for the last artifact
         _attach_narrative_report(state.artifacts[-1], state, llm, tools)
+
+        # Feed accepted artifact back into RAG for KB expansion
+        if state.accepted:
+            _ingest_artifact_into_rag(state.artifacts[-1], state, rag)
 
     # ── Stage 4: Knowledge graph ──────────────────────────────────────────────
     if kg_enabled:
@@ -487,7 +503,6 @@ def _extract_code(md: str) -> tuple[str, str]:
 
 def _collect_bib_keys(rag: LiteHybridRAG) -> list[str]:
     """Return all BibTeX keys registered in the RAG store."""
-    # The ingestor tags bib-derived chunks with meta={"kind":"bib","key":"..."}
     try:
         keys = []
         for m in rag.iter_metadata():
@@ -496,6 +511,72 @@ def _collect_bib_keys(rag: LiteHybridRAG) -> list[str]:
         return sorted(set(keys))
     except Exception:
         return []
+
+
+def _ingest_artifact_into_rag(artifact: dict, state: "RunState", rag: LiteHybridRAG) -> None:
+    """Chunk and add accepted task output back into the RAG knowledge base."""
+    try:
+        from rag.ingest import chunk_text
+        import hashlib
+        art_type = artifact.get("type", "")
+        payload = artifact.get("payload", {})
+        text_to_ingest = ""
+        if art_type == "ds":
+            code = payload.get("code", "")
+            stdout = payload.get("stdout", "")
+            text_to_ingest = f"Task: {state.task}\n\nCode:\n{code}\n\nOutput:\n{stdout}"
+        elif art_type == "writing":
+            text_to_ingest = payload.get("tex", "")[:4000]
+        elif art_type == "quant":
+            spec = payload.get("spec", {})
+            text_to_ingest = (
+                f"Strategy: {spec.get('name', '')}\n"
+                f"Signal: {spec.get('signal_code', '')}\n"
+                f"Universe: {spec.get('universe', [])}"
+            )
+        if not text_to_ingest.strip():
+            return
+        task_hash = hashlib.md5(state.task_id.encode()).hexdigest()[:8]
+        chunks = chunk_text(text_to_ingest, target_tokens=256, overlap=32)
+        existing = set(rag._ids)
+        new_docs = [
+            {
+                "id": f"result::{state.task_id}::{i}",
+                "text": ch,
+                "meta": {"kind": "doc", "source": f"task_{task_hash}", "task_id": state.task_id},
+            }
+            for i, ch in enumerate(chunks)
+            if f"result::{state.task_id}::{i}" not in existing
+        ]
+        if new_docs:
+            rag.add(new_docs)
+            print(f"[GRAPH] Ingested {len(new_docs)} chunks from accepted artifact into RAG")
+    except Exception as e:
+        print(f"[GRAPH] Artifact RAG ingest failed (non-critical): {e}")
+
+
+def _extract_bibtex_from_rag(rag: LiteHybridRAG) -> str:
+    """Generate BibTeX string from RAG-stored bib entries."""
+    entries = []
+    try:
+        seen: set[str] = set()
+        for m in rag.iter_metadata():
+            if m.get("kind") == "bib" and m.get("key"):
+                key = m["key"]
+                if key in seen:
+                    continue
+                seen.add(key)
+                title = m.get("title", "")
+                year = m.get("year", "")
+                entries.append(
+                    f"@misc{{{key},\n"
+                    f"  title = {{{title}}},\n"
+                    f"  year = {{{year}}},\n"
+                    f"}}"
+                )
+    except Exception:
+        pass
+    return "\n\n".join(entries)
 
 
 def _assemble_tex(outline, sections: list[dict]) -> str:

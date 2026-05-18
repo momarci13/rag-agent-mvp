@@ -259,13 +259,25 @@ def branch_task(task_id: str, branch_name: Optional[str] = None, from_iteration:
     if not original:
         raise ValueError(f"Task {task_id} not found")
     
-    # Create new task with same content up to specified iteration
+    # Create new task with same content up to specified iteration.
+    # Filter artifacts by their stored iteration index, not by positional slice,
+    # since multiple artifacts may be created per iteration.
+    if from_iteration > 0:
+        branch_artifacts = [
+            a for a in original.artifacts
+            if a.get("iteration", 0) < from_iteration
+        ]
+        branch_critiques = original.critiques[:from_iteration]
+    else:
+        branch_artifacts = []
+        branch_critiques = []
+
     new_task = RunState(
         task=original.task,
         task_type=original.task_type,
         subtasks=original.subtasks,
-        artifacts=original.artifacts[:from_iteration] if from_iteration > 0 else [],
-        critiques=original.critiques[:from_iteration] if from_iteration > 0 else [],
+        artifacts=branch_artifacts,
+        critiques=branch_critiques,
         iterations=from_iteration,
         accepted=False,
         decoding=original.decoding,

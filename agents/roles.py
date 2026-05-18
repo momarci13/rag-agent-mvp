@@ -363,7 +363,8 @@ def draft_section(
         f"Key points to cover:\n" + "\n".join(f"- {p}" for p in key_points)
     )
     msgs = build_messages("WRITE", user, context_docs=docs, extra_system=extra)
-    return llm.chat(msgs, temperature=0.6)
+    response = llm.chat(msgs, temperature=0.6)
+    return map_citations_to_response(response, docs)
 
 
 def critique(

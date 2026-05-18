@@ -113,11 +113,12 @@ def make_tools(cfg: dict):
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
 
-    def _latex(tex: str):
+    def _latex(tex: str, rag_bib: str = "") -> dict:
         bib_path = ROOT / "data" / "papers" / "refs.bib"
-        bib = bib_path.read_text(encoding="utf-8") if bib_path.exists() else ""
+        static_bib = bib_path.read_text(encoding="utf-8") if bib_path.exists() else ""
+        combined_bib = static_bib + ("\n\n" + rag_bib if rag_bib else "")
         tex_p, pdf_p, dropped = build_latex_artifact(
-            tex, bib, out_dir=str(ROOT / "output" / "paper"),
+            tex, combined_bib, out_dir=str(ROOT / "output" / "paper"),
         )
         return {"tex": str(tex_p), "pdf": str(pdf_p) if pdf_p else None, "dropped_keys": dropped}
 

@@ -262,34 +262,31 @@ class LiteHybridRAG:
             
         total_chunks = 0
         for paper in papers:
-            # Generate markdown content
-            content = paper.to_markdown()
-            
-            # Chunk the content
-            chunks = self._chunk_text(content, target_tokens=256, overlap=32)
-            
-            # Create docs
-            docs = []
-            for i, chunk in enumerate(chunks):
-                chunk_id = f"arxiv::{paper.arxiv_id}::{i}"
-                docs.append({
-                    "id": chunk_id,
-                    "text": chunk,
-                    "meta": {
-                        "kind": "doc",
-                        "source": f"arxiv:{paper.arxiv_id}",
-                        "chunk": i,
-                        "title": paper.title,
-                        "authors": ", ".join(paper.authors),
-                        "year": paper.published.split("-")[0] if paper.published != "unknown" else None,
-                        "url": paper.url,
-                    }
-                })
-            
-            # Add to RAG
-            self.add(docs)
-            total_chunks += len(docs)
-            
+            try:
+                content = paper.to_markdown()
+                chunks = self._chunk_text(content, target_tokens=256, overlap=32)
+                docs = []
+                for i, chunk in enumerate(chunks):
+                    chunk_id = f"arxiv::{paper.arxiv_id}::{i}"
+                    docs.append({
+                        "id": chunk_id,
+                        "text": chunk,
+                        "meta": {
+                            "kind": "doc",
+                            "source": f"arxiv:{paper.arxiv_id}",
+                            "chunk": i,
+                            "title": paper.title,
+                            "authors": ", ".join(paper.authors),
+                            "year": paper.published.split("-")[0] if paper.published != "unknown" else None,
+                            "url": paper.url,
+                        },
+                    })
+                self.add(docs)
+                total_chunks += len(docs)
+            except Exception as e:
+                print(f"[RAG] Skipping paper {getattr(paper, 'arxiv_id', '?')}: {e}")
+                continue
+
         return total_chunks
 
     def _chunk_text(self, text: str, target_tokens: int = 256, overlap: int = 32) -> list[str]:
@@ -548,113 +545,6 @@ class LiteHybridRAG:
                 "score": score,
             })
             used += approx_tokens
-        
-        return selected
-
-        m = min(m, len(self._ids))
-
-        # Apply metadata filtering
-        valid_indices = set(range(len(self._ids)))
-        if metadata_filters:
-            if metadata_filters.get("kind"):
-                kind = metadata_filters["kind"]
-                valid_indices &= {
-                    i for i in valid_indices
-                    if i < len(self._metas) and self._metas[i].get("kind") == kind
-                }
-            if "year_min" in metadata_filters or "year_max" in metadata_filters:
-                year_min = metadata_filters.get("year_min")
-                year_max = metadata_filters.get("year_max")
-                def in_year_range(y):
-                    if not y:
-                        return False
-                    try:
-                        y_int = int(y)
-                        if year_min and y_int < int(year_min):
-                            return False
-                        if year_max and y_int > int(year_max):
-                            return False
-                        return True
-                    except (ValueError, TypeError):
-                        return False
-                valid_indices &= {
-                    i for i in valid_indices
-                    if i < len(self._metas) and in_year_range(self._metas[i].get("year"))
-                }
-            if metadata_filters.get("source"):
-                source = metadata_filters["source"]
-                valid_indices &= {
-                    i for i in valid_indices
-                    if i < len(self._metas) and self._metas[i].get("source") == source
-                }
-
-        if not valid_indices:
-            return []
-
-        # Dense retrieval: get top-m candidates
-        qv = self.emb.encode([query], normalize_embeddings=True).tolist()
-        dres = self.col.query(query_embeddings=qv, n_results=m)
-        # chroma returns distances in cosine distance space (1 - cos)
-        d_ids = dres["ids"][0]
-        d_dist = dres["distances"][0]
-        
-        # Filter by metadata and build dense scores
-        dense_scores = {}
-        for i, dist in zip(d_ids, d_dist):
-            idx = self._ids.index(i)
-            if idx in valid_indices:
-                dense_scores[i] = max(0.0, 1.0 - float(dist))
-
-        # BM25
-        bm25_scores: dict[str, float] = {}
-        if self._bm25 is not None:
-            query_tokens = _tokenize_stem(query)
-            if query_tokens:
-                raw = np.asarray(self._bm25.get_scores(query_tokens), dtype=float)
-                if raw.size:
-                    mn, mx = float(raw.min()), float(raw.max())
-                    norm = (raw - mn) / (mx - mn + 1e-9)
-                    for idx in valid_indices:
-                        if idx < len(self._ids):
-                            bm25_scores[self._ids[idx]] = float(norm[idx])
-
-        # Fuse
-        keys = set(dense_scores) | set(bm25_scores)
-        fused = {
-            i: self.alpha * dense_scores.get(i, 0.0)
-            + (1 - self.alpha) * bm25_scores.get(i, 0.0)
-            for i in keys
-        }
-        ordered = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
-
-        # Greedy knapsack pack under token budget
-        id_to_idx = {i: j for j, i in enumerate(self._ids)}
-        selected: list[dict] = []
-        used = 0
-        for doc_id, score in ordered:
-            if len(selected) >= k:
-                break
-            idx = id_to_idx.get(doc_id)
-            if idx is None:
-                continue
-            text = self._texts[idx]
-            approx_tokens = _count_tokens(text)  # Use tiktoken instead of ÷4
-            if used + approx_tokens > token_budget and selected:
-                continue
-            selected.append({
-                "id": doc_id,
-                "text": text,
-                "meta": self._metas[idx] if idx < len(self._metas) else {},
-                "score": score,
-            })
-            used += approx_tokens
-        
-        # Cache result
-        if len(self._query_cache) >= self._cache_max_size:
-            # Simple eviction: remove oldest (first inserted)
-            oldest_key = next(iter(self._query_cache))
-            del self._query_cache[oldest_key]
-        self._query_cache[cache_key] = selected
         
         return selected
 

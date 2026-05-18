@@ -54,24 +54,17 @@ def process_user_message(
     
     # Retrieve relevant context from RAG
     docs = rag.retrieve(message_content, k=3)
-    doc_context = "\n".join([d.get("text", "") for d in docs])
-    
+
     # Determine response type based on message content
-    response_type = _classify_message(message_content)
-    
+    response_type = _classify_message(message_content, llm=llm)
+
     # Generate response
     if response_type == "refinement":
-        response, artifacts = _handle_refinement(
-            task, message_content, doc_context, llm
-        )
+        response, artifacts = _handle_refinement(task, message_content, docs, llm)
     elif response_type == "question":
-        response, artifacts = _handle_question(
-            task, message_content, doc_context, llm
-        )
+        response, artifacts = _handle_question(task, message_content, docs, llm)
     else:  # new_iteration
-        response, artifacts = _handle_new_iteration(
-            task, message_content, doc_context, llm
-        )
+        response, artifacts = _handle_new_iteration(task, message_content, docs, llm, rag)
     
     # Add assistant response
     assistant_msg = Message(
@@ -199,148 +192,154 @@ def branch_task(
     return new_task_id
 
 
-def _classify_message(content: str) -> str:
+def _classify_message(content: str, llm: OllamaLLM | None = None) -> str:
     """Classify user message type.
-    
+
     Returns: "question" | "refinement" | "new_iteration"
     """
+    if llm is not None:
+        try:
+            msgs = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify the following user message as exactly one of: "
+                        "question, refinement, new_iteration. "
+                        "Reply with the single word only, no punctuation."
+                    ),
+                },
+                {"role": "user", "content": content[:500]},
+            ]
+            result = llm.chat(msgs, temperature=0.0).strip().lower()
+            if result in ("question", "refinement", "new_iteration"):
+                return result
+        except Exception:
+            pass
+
+    # Keyword fallback
     content_lower = content.lower()
-    
-    # Refinement keywords
+    iteration_keywords = [
+        "run again", "execute again", "retry", "restart",
+        "new run", "from scratch", "start over",
+    ]
     refinement_keywords = [
         "refine", "improve", "adjust", "modify", "change",
-        "fix", "fix the", "update", "edit", "tweak",
-        "try again", "better", "more", "less",
+        "fix", "update", "edit", "tweak", "try again",
+        "better", "more", "less", "use ema", "use sma",
     ]
-    
-    # Question keywords
     question_keywords = [
         "what", "how", "why", "where", "when",
         "can you", "could you", "explain", "understand",
         "tell me", "show me", "interpret",
     ]
-    
-    # New iteration keywords
-    iteration_keywords = [
-        "run again", "execute again", "retry", "restart",
-        "new run", "from scratch", "start over",
-    ]
-    
+
     if any(kw in content_lower for kw in iteration_keywords):
         return "new_iteration"
     elif any(kw in content_lower for kw in refinement_keywords):
         return "refinement"
     elif any(kw in content_lower for kw in question_keywords):
         return "question"
-    else:
-        # Default to question for most things
-        return "question"
+    return "question"
 
 
 def _handle_question(
     task: RunState,
     message: str,
-    doc_context: str,
+    docs: list[dict],
     llm: OllamaLLM,
 ) -> tuple[str, list[dict]]:
-    """Handle a clarification/information question.
-    
-    Returns (response_text, artifacts).
-    """
+    """Handle a clarification/information question. Returns (response_text, [])."""
     from agents import roles
-    
-    prompt = f"""You are assisting with a data analysis task.
 
-Original task: {task.task}
-
-Task type: {task.task_type}
-
-Current iteration: {task.iterations}
-
-User question: {message}
-
-Relevant documentation:
-{doc_context}
-
-Provide a clear, concise answer to the user's question in the context of this task.
-If you can provide code improvements or suggestions, include them.
-"""
-    
-    response = llm.invoke(prompt)
-    
+    prompt = (
+        f"Original task: {task.task}\n"
+        f"Task type: {task.task_type}\n"
+        f"Iteration: {task.iterations}\n\n"
+        f"User question: {message}"
+    )
+    msgs = roles.build_messages("DS", prompt, context_docs=docs)
+    response = llm.chat(msgs)
     return response, []
 
 
 def _handle_refinement(
     task: RunState,
     message: str,
-    doc_context: str,
+    docs: list[dict],
     llm: OllamaLLM,
 ) -> tuple[str, list[dict]]:
-    """Handle a refinement request.
-    
-    Returns (response_text, artifacts).
+    """Handle a refinement request — regenerates the artifact with user feedback.
+
+    Returns (response_text, [new_artifact]).
     """
     from agents import roles
-    
-    # Extract last artifact for context
+
     last_artifact = task.artifacts[-1] if task.artifacts else None
-    last_artifact_context = ""
-    if last_artifact:
-        last_artifact_context = f"\nLast artifact type: {last_artifact.get('type')}\n"
-        if last_artifact.get('raw'):
-            last_artifact_context += f"Last code:\n{last_artifact['raw']}\n"
-    
-    prompt = f"""You are assisting with a data analysis task refinement.
+    feedback = f"Refinement request: {message}"
+    if last_artifact and last_artifact.get("raw"):
+        feedback += f"\n\nPrevious code:\n{last_artifact['raw'][:2000]}"
 
-Original task: {task.task}
+    if task.task_type == "trading_research":
+        spec = roles.design_strategy(llm, task.task, docs)
+        new_artifact = {
+            "type": "quant",
+            "payload": {"spec": spec.model_dump(), "backtest": None},
+            "iteration": task.iterations,
+            "refined": True,
+        }
+        response = f"Refined strategy generated: {spec.name}."
+    else:
+        code_md = roles.analyze(llm, task.task, docs, feedback=feedback, decoding=task.decoding)
+        new_artifact = {
+            "type": "ds",
+            "payload": {"code": code_md, "stdout": "", "stderr": "", "returncode": None},
+            "raw": code_md,
+            "iteration": task.iterations,
+            "refined": True,
+        }
+        response = "Refinement complete. Updated code has been generated."
 
-Task type: {task.task_type}
-
-Current iteration: {task.iterations}
-
-Refinement request: {message}
-
-{last_artifact_context}
-
-Relevant documentation:
-{doc_context}
-
-Provide a concise response acknowledging the refinement request.
-Suggest what changes you would make to improve the analysis.
-"""
-    
-    response = llm.invoke(prompt)
-    
-    return response, []
+    return response, [new_artifact]
 
 
 def _handle_new_iteration(
     task: RunState,
     message: str,
-    doc_context: str,
+    docs: list[dict],
     llm: OllamaLLM,
+    rag: LiteHybridRAG,
 ) -> tuple[str, list[dict]]:
-    """Handle request to start a new iteration.
-    
-    Returns (response_text, artifacts).
+    """Handle request to start a new iteration — runs scholar augmentation then re-executes.
+
+    Returns (response_text, [new_artifact]).
     """
-    prompt = f"""You are assisting with restarting a data analysis task.
+    from agents import roles
+    from tools import scholar
 
-Original task: {task.task}
+    # Scholar augmentation: fetch new papers and ingest into KB
+    try:
+        papers, scholar_ctx = scholar.scholar_augment_task(task.task, n_papers=3)
+        if papers:
+            rag.ingest_papers(papers)
+        if scholar_ctx:
+            docs.insert(0, {
+                "id": "scholar_context",
+                "text": scholar_ctx,
+                "meta": {"kind": "scholar", "source": "arxiv_dynamic"},
+            })
+    except Exception:
+        pass
 
-Task type: {task.task_type}
+    feedback = (
+        f"New iteration request: {message}\n"
+        f"Previous iterations completed: {task.iterations}"
+    )
+    code_md = roles.analyze(llm, task.task, docs, feedback=feedback, decoding=task.decoding)
 
-Previous iterations: {task.iterations}
-
-User request: {message}
-
-Relevant documentation:
-{doc_context}
-
-Acknowledge the request to restart and summarize what we'll do in the new iteration.
-"""
-    
-    response = llm.invoke(prompt)
-    
-    return response, []
+    new_artifact = {
+        "type": "ds",
+        "payload": {"code": code_md, "stdout": "", "stderr": "", "returncode": None},
+        "raw": code_md,
+        "iteration": task.iterations + 1,
+    }
+    return "Starting new iteration with updated approach.", [new_artifact]

@@ -183,8 +183,11 @@ Analysis pipeline:
         # Try to compile PDF
         pdf_path = None
         try:
+            from pathlib import Path as _Path
             from .tex import build_latex_artifact
-            tex_p, pdf_p, dropped = build_latex_artifact(latex_content, "", str(self.output_dir))
+            _bib_path = _Path(__file__).parent.parent / "data" / "papers" / "refs.bib"
+            _bib = _bib_path.read_text(encoding="utf-8") if _bib_path.exists() else ""
+            tex_p, pdf_p, dropped = build_latex_artifact(latex_content, _bib, str(self.output_dir))
             if pdf_p:
                 pdf_path = pdf_p
         except Exception as e:

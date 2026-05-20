@@ -8,6 +8,7 @@ Handles:
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Any, Optional
 
@@ -18,6 +19,8 @@ from rag.hybrid import LiteHybridRAG
 from tools.sandbox import run_code_sync
 from tools import task_storage
 
+logger = logging.getLogger(__name__)
+
 
 def process_user_message(
     task_id: str,
@@ -25,7 +28,7 @@ def process_user_message(
     llm: OllamaLLM,
     rag: LiteHybridRAG,
     iteration: int = 0,
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[dict], list[dict]]:
     """Process a user message and generate assistant response.
     
     Args:
@@ -36,7 +39,7 @@ def process_user_message(
         iteration: Which iteration this belongs to
     
     Returns:
-        (assistant_response_text, new_artifacts)
+        (assistant_response_text, new_artifacts, discovered_sources)
     """
     # Load task
     task = task_storage.load_task(task_id)
@@ -51,20 +54,50 @@ def process_user_message(
         iteration=iteration,
     )
     task.messages.append(user_msg)
-    
-    # Retrieve relevant context from RAG
-    docs = rag.retrieve(message_content, k=3)
+
+    # Compress conversation memory if thread is long
+    memory_context = ""
+    try:
+        from tools.memory import build_context_with_memory
+        memory_context, _ = build_context_with_memory(task, llm)
+    except Exception as exc:
+        logger.debug("[CONV] Memory compression skipped: %s", exc)
+
+    # Retrieve relevant context from RAG (with LLM query expansion)
+    docs = rag.retrieve(message_content, k=3, llm=llm)
+
+    # Auto-expand KB if retrieval quality is low
+    try:
+        from tools.kb_expansion import expand_kb_on_weak_retrieval
+        docs, _expanded = expand_kb_on_weak_retrieval(
+            message_content, docs, rag, llm, task_id,
+        )
+    except Exception as exc:
+        logger.debug("[CONV] KB expansion skipped: %s", exc)
+
+    # Inject memory context as a leading doc
+    if memory_context:
+        docs = [{"id": "memory_context", "text": memory_context,
+                 "meta": {"kind": "memory", "source": "conversation"}}] + docs
 
     # Determine response type based on message content
     response_type = _classify_message(message_content, llm=llm)
 
     # Generate response
-    if response_type == "refinement":
-        response, artifacts = _handle_refinement(task, message_content, docs, llm)
-    elif response_type == "question":
-        response, artifacts = _handle_question(task, message_content, docs, llm)
-    else:  # new_iteration
-        response, artifacts = _handle_new_iteration(task, message_content, docs, llm, rag)
+    try:
+        if response_type == "refinement":
+            response, artifacts, discovered_sources = _handle_refinement(task, task_id, message_content, docs, llm, rag)
+        elif response_type == "question":
+            response, artifacts, discovered_sources = _handle_question(task, message_content, docs, llm)
+        else:  # new_iteration
+            response, artifacts, discovered_sources = _handle_new_iteration(task, task_id, message_content, docs, llm, rag)
+    except Exception as e:
+        response = (
+            f"I encountered an error processing your request: {e}\n\n"
+            "Please try rephrasing, or start a new task."
+        )
+        artifacts = []
+        discovered_sources = []
     
     # Add assistant response
     assistant_msg = Message(
@@ -81,8 +114,8 @@ def process_user_message(
     
     # Save updated task
     task_storage.save_task(task)
-    
-    return response, artifacts
+
+    return response, artifacts, discovered_sources
 
 
 def re_execute_artifact(
@@ -242,13 +275,19 @@ def _classify_message(content: str, llm: OllamaLLM | None = None) -> str:
     return "question"
 
 
+_FOLLOW_UP_PROMPT = (
+    "\n\n---\n"
+    "*Would you like me to generate a PDF report, execute the code, or make further modifications?*"
+)
+
+
 def _handle_question(
     task: RunState,
     message: str,
     docs: list[dict],
     llm: OllamaLLM,
-) -> tuple[str, list[dict]]:
-    """Handle a clarification/information question. Returns (response_text, [])."""
+) -> tuple[str, list[dict], list[dict]]:
+    """Handle a clarification/information question. Returns (response_text, [], [])."""
     from agents import roles
 
     prompt = (
@@ -258,21 +297,39 @@ def _handle_question(
         f"User question: {message}"
     )
     msgs = roles.build_messages("DS", prompt, context_docs=docs)
-    response = llm.chat(msgs)
-    return response, []
+    response = llm.chat(msgs) + _FOLLOW_UP_PROMPT
+    return response, [], []
 
 
 def _handle_refinement(
     task: RunState,
+    task_id: str,
     message: str,
     docs: list[dict],
     llm: OllamaLLM,
-) -> tuple[str, list[dict]]:
+    rag: LiteHybridRAG,
+) -> tuple[str, list[dict], list[dict]]:
     """Handle a refinement request — regenerates the artifact with user feedback.
 
-    Returns (response_text, [new_artifact]).
+    Returns (response_text, [new_artifact], discovered_sources).
     """
     from agents import roles
+    from tools import source_search
+
+    discovered_sources: list[dict] = []
+    try:
+        results = source_search.multi_source_search(task.task, n_papers=3, llm=llm)
+        discovered_sources = [r.to_dict() for r in results]
+        hop0 = [r for r in results if r.hop == 0]
+        if hop0:
+            rag.ingest_papers(hop0)
+        source_search.save_pending_sources(task_id, results)
+        ctx_parts = [f"# {r.title}\n{r.abstract}" for r in hop0[:3] if r.abstract]
+        if ctx_parts:
+            docs = [{"id": "source_context", "text": "\n\n".join(ctx_parts),
+                     "meta": {"kind": "scholar", "source": "multi_source"}}] + docs
+    except Exception:
+        pass
 
     last_artifact = task.artifacts[-1] if task.artifacts else None
     feedback = f"Refinement request: {message}"
@@ -287,7 +344,11 @@ def _handle_refinement(
             "iteration": task.iterations,
             "refined": True,
         }
-        response = f"Refined strategy generated: {spec.name}."
+        response = (
+            f"Refined strategy generated: **{spec.name}**.\n\n"
+            f"Signal: `{spec.signal_code}`"
+            + _FOLLOW_UP_PROMPT
+        )
     else:
         code_md = roles.analyze(llm, task.task, docs, feedback=feedback, decoding=task.decoding)
         new_artifact = {
@@ -297,35 +358,45 @@ def _handle_refinement(
             "iteration": task.iterations,
             "refined": True,
         }
-        response = "Refinement complete. Updated code has been generated."
+        code_preview = "\n".join(code_md.splitlines()[:60])
+        response = (
+            f"Here is the refined code:\n\n```python\n{code_preview}\n```\n\n"
+            f"The analysis has been updated based on your feedback."
+            + _FOLLOW_UP_PROMPT
+        )
 
-    return response, [new_artifact]
+    return response, [new_artifact], discovered_sources
 
 
 def _handle_new_iteration(
     task: RunState,
+    task_id: str,
     message: str,
     docs: list[dict],
     llm: OllamaLLM,
     rag: LiteHybridRAG,
-) -> tuple[str, list[dict]]:
-    """Handle request to start a new iteration — runs scholar augmentation then re-executes.
+) -> tuple[str, list[dict], list[dict]]:
+    """Handle request to start a new iteration — runs multi-source search then re-executes.
 
-    Returns (response_text, [new_artifact]).
+    Returns (response_text, [new_artifact], discovered_sources).
     """
     from agents import roles
-    from tools import scholar
+    from tools import source_search
 
-    # Scholar augmentation: fetch new papers and ingest into KB
+    discovered_sources: list[dict] = []
     try:
-        papers, scholar_ctx = scholar.scholar_augment_task(task.task, n_papers=3)
-        if papers:
-            rag.ingest_papers(papers)
-        if scholar_ctx:
+        results = source_search.multi_source_search(task.task, n_papers=3, llm=llm)
+        discovered_sources = [r.to_dict() for r in results]
+        hop0 = [r for r in results if r.hop == 0]
+        if hop0:
+            rag.ingest_papers(hop0)
+        source_search.save_pending_sources(task_id, results)
+        ctx_parts = [f"# {r.title}\n{r.abstract}" for r in hop0[:3] if r.abstract]
+        if ctx_parts:
             docs.insert(0, {
-                "id": "scholar_context",
-                "text": scholar_ctx,
-                "meta": {"kind": "scholar", "source": "arxiv_dynamic"},
+                "id": "source_context",
+                "text": "\n\n".join(ctx_parts),
+                "meta": {"kind": "scholar", "source": "multi_source"},
             })
     except Exception:
         pass
@@ -342,4 +413,10 @@ def _handle_new_iteration(
         "raw": code_md,
         "iteration": task.iterations + 1,
     }
-    return "Starting new iteration with updated approach.", [new_artifact]
+    code_preview = "\n".join(code_md.splitlines()[:60])
+    response = (
+        f"New iteration started. Here is the updated code:\n\n```python\n{code_preview}\n```\n\n"
+        f"This incorporates your feedback and any newly retrieved research."
+        + _FOLLOW_UP_PROMPT
+    )
+    return response, [new_artifact], discovered_sources

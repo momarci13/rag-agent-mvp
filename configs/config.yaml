@@ -27,8 +27,8 @@ llm:
   num_ctx: 8192            # context window; raise to 16384 on 32 GB RAM
   temperature: 0.2         # low for planning / critic / code
   temperature_creative: 0.6  # writer role
-  timeout_s: 180
-  fallback_timeout_s: 60   # Timeout per model in fallback chain
+  timeout_s: 240           # qwen2.5:7b on laptop GPU needs up to 4 min for full analysis
+  fallback_timeout_s: 90   # Timeout per model in fallback chain
 
 rag:
   db_path: "./kb/chroma"
@@ -40,8 +40,8 @@ rag:
   top_m: 30                 # candidates before rerank fusion
   token_budget: 3500        # packed context budget for the LLM
   query_expansion:
-    enabled: false
-    method: "local_model"
+    enabled: true
+    method: "llm_then_local"    # try LLM first, fall back to rule-based
     max_expansions: 3
   reranking:
     enabled: false
@@ -83,10 +83,21 @@ research:
   n_papers: 8               # arXiv papers to acquire per topic
   kg_enabled: true          # update knowledge graph after each run
   skip_known_papers: true   # skip papers already in the literature registry
+  citation_dag_hops: 2      # max citation graph traversal depth
   # arXiv categories auto-detected from keywords:
   #   ML/DL  -> cs.LG, cs.AI, stat.ML, stat.AP, math.ST
   #   Finance -> q-fin, q-fin.PM, stat.ML, math.ST
   #   Both   -> all categories above
+
+autonomous_loop:
+  n_iterations: 3           # max iterations in autonomous research loop
+  n_papers_per_iter: 6      # papers searched per loop iteration
+  quality_threshold: 0.40   # target mean retrieval score before stopping
+
+memory:
+  compression_threshold: 20 # compress when task message count exceeds this
+  keep_last: 8              # always retain N most-recent messages
+  kb_expansion_threshold: 0.25  # mean score below which auto KB expansion fires
 
 data:
   # Free FRED API key: https://fred.stlouisfed.org/docs/api/api_key.html

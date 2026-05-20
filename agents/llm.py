@@ -93,15 +93,14 @@ class OllamaLLM:
         model_chain = self.select_models(task_complexity)
         last_error = None
 
-        for model_spec in model_chain:
+        for i, model_spec in enumerate(model_chain):
+            original_model = self.cfg.model
             try:
-                original_model = self.cfg.model
                 self.cfg.model = model_spec.name
-                self._client.timeout = self.cfg.timeout_s
+                # First attempt uses full timeout; fallbacks use shorter timeout
+                self._client.timeout = self.cfg.timeout_s if i == 0 else self.cfg.fallback_timeout_s
 
                 result = self.chat(messages, temperature=temperature, json_mode=json_mode, stop=stop)
-                self.cfg.model = original_model
-                self._client.timeout = self.cfg.timeout_s
                 return result
             except Exception as e:
                 last_error = e

@@ -2,11 +2,18 @@
 
 Provides synonym expansion, related term discovery, and multi-query generation
 to improve retrieval quality beyond single-pass queries.
+Supports LLM-based reformulation when an OllamaLLM instance is available.
 """
 from __future__ import annotations
 
+import logging
 import re
-from typing import List
+from typing import TYPE_CHECKING, List
+
+if TYPE_CHECKING:
+    from agents.llm import OllamaLLM
+
+logger = logging.getLogger(__name__)
 
 try:
     import nltk
@@ -145,6 +152,38 @@ class QueryExpander:
                 expansions.append(f"{query} {term}")
 
         return expansions
+
+
+def expand_query_with_llm(
+    query: str,
+    llm: "OllamaLLM",
+    n_variants: int = 3,
+) -> list[str]:
+    """Generate n_variants academically-diverse reformulations via LLM JSON call.
+
+    Returns new queries only (original excluded). Falls back to [] on failure.
+    """
+    msgs = [
+        {
+            "role": "system",
+            "content": (
+                f"Generate {n_variants} alternative academic search queries for the query below. "
+                "Each variant should target a different aspect or use different terminology. "
+                "Keep each query 3–8 words. "
+                f'Respond with JSON only: {{"queries": ["...", "...", "..."]}}'
+            ),
+        },
+        {"role": "user", "content": query[:300]},
+    ]
+    try:
+        result = llm.chat_json(msgs, temperature=0.0)
+        variants = result.get("queries") or []
+        seen = {query.lower()}
+        cleaned = [v for v in variants if isinstance(v, str) and v.lower() not in seen]
+        return cleaned[:n_variants]
+    except Exception as exc:
+        logger.warning("[QUERY_EXPANSION] LLM expansion failed: %s", exc)
+        return []
 
 
 def expand_quant_query(query: str) -> list[str]:

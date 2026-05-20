@@ -1,17 +1,17 @@
-# ROG-Agent MVP — User Manual
+# RAG-Agent MVP — User Manual
 
 ## Contents
 
 1. [Hardware reality check](#1-hardware-reality-check)
 2. [Installation](#2-installation)
 3. [First run](#3-first-run)
-3.5 [Web interface](#35-web-interface)
-4. [How tasks work](#4-how-tasks-work)
-5. [Building your knowledge base](#5-building-your-knowledge-base)
-6. [Configuration reference](#6-configuration-reference)
-7. [Mathematical framework](#7-mathematical-framework)
-8. [Troubleshooting](#8-troubleshooting)
-9. [Extending the system](#9-extending-the-system)
+4. [Web interface and API](#4-web-interface-and-api)
+5. [How tasks work](#5-how-tasks-work)
+6. [Building your knowledge base](#6-building-your-knowledge-base)
+7. [Configuration reference](#7-configuration-reference)
+8. [Mathematical framework](#8-mathematical-framework)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Extending the system](#10-extending-the-system)
 
 ---
 
@@ -169,6 +169,19 @@ python run.py "Compute the mean and standard deviation of SPY daily returns from
 
 Expected runtime on an X13 with RTX 4060 mobile: 60–180 s end to end. The console prints the task classification, iteration count, critic verdict, and artifact summary. Full runs are saved to `output/runs/run_NNNN.json`.
 
+Additional CLI modes:
+
+```bash
+# Full staged research pipeline (literature + hypothesis + experiment + KG)
+python run.py --research "Low-volatility anomaly in equity markets"
+
+# Autonomous iterative research loop (no human input required mid-loop)
+python run.py --auto-research "GARCH volatility clustering" --iterations 3
+
+# Inspect the knowledge graph
+python run.py --kg-summary
+```
+
 ### Web App
 
 Start the local web server for a graphical interface:
@@ -177,11 +190,11 @@ Start the local web server for a graphical interface:
 python -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-Then open http://127.0.0.1:8000 in your browser. Use the web UI to run tasks, ingest documents, and view saved runs. Tasks run asynchronously and display results in the interface.
+Then open http://127.0.0.1:8000 in your browser.
 
 ---
 
-## 3.5 Web interface
+## 4. Web interface and API
 
 The web interface provides a local dashboard at http://127.0.0.1:8000 for interactive use.
 
@@ -191,51 +204,69 @@ The web interface provides a local dashboard at http://127.0.0.1:8000 for intera
 python -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-The server serves static files from the `web/` directory and provides REST endpoints for task execution.
+### How the async task flow works
+
+When you submit a task, the server queues it as a background job and returns
+`{status: "queued", task_id: "..."}` immediately. The browser opens a
+Server-Sent Events stream to `/api/tasks/{id}/stream` and shows an animated
+progress bar. When the worker completes, the stream emits a `completed` event
+and the result card renders automatically.
+
+Requires `sse-starlette`: `pip install sse-starlette>=1.8.2`.
 
 ### Features
 
-- **Run tasks**: Enter natural-language tasks in the text box and click "Run task". Results appear below, including generated code (Python or R) and execution output for Python tasks.
-- **Ingest documents**: Specify a file or folder path to add content to the knowledge base.
-- **Multifidelity KAN demo**: Run a built-in demonstration of the KAN model on synthetic data.
-- **Saved runs**: View and load previous task results from `output/runs/`.
+- **Run tasks**: Enter natural-language tasks and press Enter. A live progress
+  bar tracks the background job; results render automatically when done.
+- **Source approval panel**: After a research task, discovered papers from
+  arXiv, OpenAlex, and Semantic Scholar appear as checkboxes. Select which ones
+  to add to your KB and click "Add selected to KB".
+- **Ingest documents**: Specify a file or folder path to add content to the KB.
+- **Multifidelity KAN demo**: Run a built-in demonstration of the KAN model.
+- **Saved conversations**: Click any task in the sidebar to reload it.
 
-### API endpoints
+### API reference
 
-**Task execution**
+**Async task execution** (return `{status: "queued", task_id}` immediately)
 - `GET /health` — LLM + RAG health check.
-- `POST /run-task` — Run a standard agent task (`{"task": "..."}`).
-- `POST /research-task` — Full staged research pipeline (`{"task": "...", "n_papers": 8, "kg_enabled": true}`).
+- `POST /run-task` — Queue a standard agent task (`{"task": "..."}`).
+- `POST /research-task` — Queue full staged research pipeline (`{"task": "...", "n_papers": 8, "kg_enabled": true}`).
+- `POST /api/research/autonomous` — Queue autonomous iterative loop (`{"topic": "...", "n_iterations": 3, "n_papers_per_iter": 6}`).
 - `POST /ingest` — Ingest a file or directory (`{"path": "..."}`).
-- `GET /kan-demo` — Run the built-in KAN demo.
+- `GET /kan-demo` — Run the built-in KAN demo (synchronous).
 
-**Task management (persistent storage)**
+**Progress streaming**
+- `GET /api/tasks/{task_id}/stream` — SSE stream emitting `progress`, `completed`, or `failed` events for a background task.
+
+**Task management**
 - `GET /api/tasks` — List all tasks (`?limit=50&offset=0&sort_by=-updated_at`).
 - `GET /api/tasks/{task_id}` — Get full task with all messages and artifacts.
 - `GET /api/tasks/search?q=...` — Keyword search across task titles and tags.
-- `POST /api/tasks/{task_id}/messages` — Send a follow-up message to a task (`{"content": "...", "iteration": 0}`). Returns assistant response and any new artifacts.
-- `POST /api/tasks/{task_id}/branch` — Branch a task from a given iteration (`{"branch_name": "...", "from_iteration": 1}`).
+- `POST /api/tasks/{task_id}/messages` — Send a follow-up message (`{"content": "...", "iteration": 0}`).
+- `POST /api/tasks/{task_id}/branch` — Branch from an iteration (`{"branch_name": "...", "from_iteration": 1}`).
 - `POST /api/tasks/{task_id}/artifacts/{artifact_id}/re-run` — Re-execute artifact code after editing (`{"code": "..."}`).
 - `POST /api/tasks/{task_id}/template` — Export a task as a reusable template.
 
 **Reports and knowledge**
-- `GET /api/reports/{task_id}/pdf` — Download the compiled PDF for a task.
-- `GET /api/kg/summary` — Knowledge graph summary (papers, findings, linked tasks).
+- `GET /api/tasks/{task_id}/research-report` — Serve auto-generated markdown research report.
+- `GET /api/reports/{task_id}/pdf` — Download compiled LaTeX PDF.
+- `POST /api/kb/approve` — Ingest selected discovered sources (`{"task_id": "...", "source_ids": [...]}`).
+- `GET /api/kg/summary` — Knowledge graph summary.
 - `GET /api/literature/registry` — Literature acquisition registry stats.
 
 **Legacy**
 - `GET /runs` — List legacy CLI run files in `output/runs/`.
 - `GET /runs/{filename}` — Retrieve a legacy run by filename.
 
-The web interface is fully client-side JavaScript with no external dependencies.
+### Multi-turn conversations and branching
 
----
+Each task is a persistent chatblock. After a task runs, you can continue
+refining it without starting over.
 
-## 3.6 Multi-turn conversations and branching
-
-Each task is a persistent chatblock. After a task runs, you can continue refining it without starting over.
-
-### Sending a follow-up message (API)
+**Follow-up messages** are classified automatically:
+- **Question** — answered from RAG context, no re-execution.
+- **Refinement** — re-runs the role with the prior artifact as context; returns a new artifact.
+- **New iteration** — fetches fresh papers, adds them to the KB, then re-executes the full pipeline.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/messages \
@@ -243,14 +274,7 @@ curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/messages \
   -d '{"content": "Refine the signal to use EMA instead of SMA"}'
 ```
 
-The system classifies the message automatically:
-- **Question** — answered from RAG context, no re-execution.
-- **Refinement** — re-runs the appropriate role function with the prior artifact as context; returns a new artifact.
-- **New iteration** — fetches fresh arXiv papers, adds them to the KB, then re-executes the full role pipeline.
-
-### Branching a task
-
-Branch from any iteration to try a different approach while preserving the original:
+**Branching** from any iteration to try a different approach while preserving the original:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/branch \
@@ -258,15 +282,9 @@ curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/branch \
   -d '{"branch_name": "ema-variant", "from_iteration": 1}'
 ```
 
-The branch inherits only the artifacts from iterations before `from_iteration` and is independent of the original from that point.
-
-### KB expansion
-
-Every time a task is accepted, its artifact (code + output, strategy spec, or LaTeX) is chunked and ingested into the RAG store. New arXiv papers fetched during iterations also persist in the KB. This means subsequent tasks automatically benefit from prior results — no manual `--ingest` required.
-
 ---
 
-## 4. How tasks work
+## 5. How tasks work
 
 ### The pipeline
 
@@ -277,11 +295,14 @@ USER TASK  (or follow-up message via /api/tasks/{id}/messages)
 PLAN  ── classify into: data_science | trading_research | writing | mixed
    │
    ▼
-SCHOLAR  ── fetch relevant arXiv papers → ingest into KB (async, per iteration)
+RECALL  ── retrieve prior findings (kind=finding) from semantic memory
    │
    ▼
-RAG retrieve  ── hybrid (BM25 + dense), top-k under token budget
-   │
+MULTI-SOURCE SEARCH  ── arXiv + OpenAlex + Semantic Scholar
+   │                     1-hop citation traversal, user approval panel
+   ▼
+RAG retrieve  ── hybrid (BM25 + dense + LLM query expansion)
+   │            auto-expands KB if retrieval quality < threshold
    ▼
 EXECUTE role appropriate to task type:
    • data_science      → DS prompt → code (Python/R) → sandbox.run_py
@@ -291,11 +312,30 @@ EXECUTE role appropriate to task type:
    ▼
 CRITIC  ── grounded? numerics_ok? code_runs?
    │
-   ├── accept = True  → save task → ingest artifact into KB → done
+   ├── accept = True  → save task → ingest artifact into KB
+   │                 → store findings in semantic memory
+   │                 → done
    └── accept = False → revise (max_iter times)
 ```
 
-For the staged **research pipeline** (`--research` / `POST /research-task`), an additional `LITERATURE_ANALYST` → `HYPOTHESIS_FORMER` → `NARRATOR` chain runs before the executor, and the knowledge graph is updated after acceptance.
+For the staged **research pipeline** (`--research` / `POST /research-task`):
+- Additional `LITERATURE_ANALYST` → `HYPOTHESIS_FORMER` → `NARRATOR` chain
+- Citation DAG expanded (2-hop BFS via OpenAlex)
+- Structured markdown research report auto-generated
+- Knowledge graph updated after acceptance
+
+For the **autonomous research loop** (`--auto-research` / `POST /api/research/autonomous`):
+
+```
+for N iterations:
+  RETRIEVE from current KB (LLM query expansion)
+  GAP-DETECT ── LLM identifies uncovered subtopics
+  SEARCH ── multi-source search on topic + gap queries
+  EXPAND ── ingest new papers, BFS-expand citation DAG
+  check convergence (stop if retrieval quality delta < 0.05)
+REPORT ── generate structured research report
+STORE ── embed findings in semantic memory for future tasks
+```
 
 ### Anatomy of a trading task
 
@@ -348,12 +388,12 @@ Output lands in `output/paper/main.tex` and `output/paper/main.pdf`.
 
 ---
 
-## 5. Building your knowledge base
+## 6. Building your knowledge base
 
 The KB lives in `kb/chroma` (Chroma SQLite) plus `kb/main_bm25.pkl` (BM25
 index cache). Both are gitignored.
 
-### Adding files
+### Adding files manually
 
 ```bash
 # Single file
@@ -368,32 +408,64 @@ python run.py --ingest ~/Documents/finance-papers/
 Supported: `.pdf`, `.md`, `.txt`, `.tex`, `.bib`. Other extensions are
 silently skipped.
 
-### Dynamic scholar augmentation
+### Multi-source paper discovery
 
-For research tasks, the system automatically searches arXiv for relevant
-academic papers and adds them to your KB **for that task only**. This
-happens transparently after planning.
+For research tasks, the system searches **three sources simultaneously**:
 
-**How it works:**
-1. Task description is analyzed for keywords (e.g., "momentum strategy"
-   → "momentum", "strategy", "finance").
-2. arXiv API queried for papers in quantitative finance (`q-fin` category).
-3. Top 5 papers fetched, converted to markdown, chunked, and indexed.
-4. Papers are retrieved alongside your static KB during execution.
-5. Papers remain in KB for future tasks (no cleanup needed).
+| Source | Coverage | API key? |
+|---|---|---|
+| **arXiv** | Preprints, CS/Math/Finance | None |
+| **OpenAlex** | 250 M academic works, all fields | None |
+| **Semantic Scholar** | CS, finance, ML with citation counts | None |
 
-**Benefits:**
-- Access to cutting-edge research without manual curation.
-- Citations from recent papers (2020+) in writing tasks.
-- No API keys needed (arXiv is public).
+After search, a **1-hop citation traversal** fetches references and
+citing papers via OpenAlex, scored by citation count. A persistent
+**citation DAG** (NetworkX DiGraph, saved to `output/citation_dag.json`)
+accumulates across sessions. PageRank on the DAG surfaces the most
+influential papers.
 
-**Limitations:**
-- Only quantitative finance papers (`q-fin` category).
-- Requires internet connection.
-- arXiv search is keyword-based, not semantic.
+All discovered papers appear as a **checkbox approval panel** in the web
+UI so you decide exactly what enters the KB. Papers not yet approved are
+saved as `pending_sources.json` in the task directory and can be approved
+later via `POST /api/kb/approve`.
 
-If no papers are found or network fails, the system continues with your
-static KB only.
+### Failure-driven KB auto-expansion
+
+If retrieval quality (mean hybrid score) drops below the configured
+`kb_expansion_threshold` (default 0.25), the system automatically:
+1. Runs a multi-source search on the current query.
+2. Ingests hop=0 papers immediately.
+3. Saves remaining papers to `pending_sources.json` for review.
+4. Re-retrieves with the expanded KB.
+
+This happens silently in the background; a log entry `[KB_EXPAND] Low
+retrieval quality (score=X), triggered expansion → N papers ingested`
+records the event.
+
+### Cross-task semantic memory
+
+When a research artifact is accepted, its key findings are embedded and
+stored in Chroma with `metadata={"kind": "finding", "task_id": "..."}`.
+On subsequent tasks (even in a new session), these findings are retrieved
+by dense similarity and prepended to the RAG context as "Prior Finding:"
+entries. This means the system gets smarter across sessions without any
+manual curation.
+
+### Conversation memory compression
+
+Long task threads (>20 messages by default) are automatically compressed.
+Older messages are summarised by the LLM into a `MemorySummary` (saved to
+`output/tasks/{id}/memory_summary.json`) and the summary is prepended as
+a context document. The 8 most recent messages remain verbatim. This
+prevents context-window blowup on long multi-turn sessions.
+
+Thresholds are configurable in `configs/config.yaml`:
+```yaml
+memory:
+  compression_threshold: 20   # messages before compression
+  keep_last: 8                # recent messages kept verbatim
+  kb_expansion_threshold: 0.25
+```
 
 ### What gets indexed
 
@@ -402,6 +474,8 @@ static KB only.
 - **BibTeX**: each entry becomes one chunk tagged
   `meta={"kind":"bib","key":"..."}`. The writer's citation validator
   reads these to know which keys are valid.
+- **Findings** (`kind=finding`): auto-ingested from accepted artifacts;
+  retrieved by dense search across tasks.
 
 ### Inspecting the KB
 
@@ -411,6 +485,10 @@ rag = LiteHybridRAG()
 print(f"{len(rag)} chunks")
 for r in rag.retrieve("momentum factor", k=3):
     print(r["score"], r["id"], r["text"][:80])
+
+# See only prior research findings
+for r in rag.retrieve("volatility", k=5, metadata_filters={"kind": "finding"}):
+    print(r["meta"].get("task_id"), r["text"][:80])
 ```
 
 ### Resetting
@@ -424,7 +502,7 @@ Or just `rm -rf kb/chroma kb/*.pkl`.
 
 ---
 
-## 6. Configuration reference
+## 7. Configuration reference
 
 Edit `configs/config.yaml`. Key knobs:
 
@@ -458,10 +536,15 @@ rag:
   top_k: 6             # number of chunks fed to the LLM
   top_m: 30            # candidates considered before fusion
   token_budget: 3500   # context budget for retrieved docs
+  query_expansion:
+    enabled: true
+    method: "llm_then_local"   # LLM rewrite first, rule-based fallback
+    max_expansions: 3          # query variants generated
 ```
 
 If your corpus is mostly numeric/technical, lower `alpha_dense` to ~0.4
-(BM25 wins on rare token matches).
+(BM25 wins on rare token matches). Disable query expansion (`enabled: false`)
+to save ~100 ms per retrieval on slow hardware.
 
 ### Trading section
 
@@ -489,9 +572,28 @@ agent:
   sandbox_mem_mb: 2048       # rlimit on Linux; ignored on Windows
 ```
 
+### Research and autonomous loop sections
+
+```yaml
+research:
+  n_papers: 8                # papers fetched per research pipeline run
+  kg_enabled: true           # update knowledge graph after acceptance
+  citation_dag_hops: 2       # BFS depth for citation traversal
+
+autonomous_loop:
+  n_iterations: 3            # max loop iterations
+  n_papers_per_iter: 6       # papers per search query per iteration
+  quality_threshold: 0.40    # convergence threshold (retrieval quality)
+
+memory:
+  compression_threshold: 20  # messages before rolling compression
+  keep_last: 8               # recent messages kept verbatim
+  kb_expansion_threshold: 0.25  # retrieval quality trigger for auto-expansion
+```
+
 ---
 
-## 7. Mathematical framework
+## 8. Mathematical framework
 
 This section documents the formulas the agents use so you can verify
 their outputs.
@@ -579,7 +681,7 @@ returns.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### `httpx.ConnectError` to `http://localhost:11434`
 
@@ -658,6 +760,29 @@ Two common causes:
 
 You can also disable the critic loop entirely with `--max-iter 1`.
 
+### Progress bar never completes / `/stream` returns 503
+
+`sse-starlette` is not installed:
+
+```bash
+pip install sse-starlette>=1.8.2
+```
+
+After installing, restart the server. All other endpoints work without it.
+
+### Multi-source search returns 0 papers
+
+- OpenAlex and Semantic Scholar require internet access.
+- Check the log (`output/agent.log`) for `[SOURCE] ... search failed:` lines.
+- arXiv alone is always the fallback; tasks continue even if OpenAlex/S2 are unreachable.
+
+### Autonomous loop exits after iteration 1
+
+Retrieval quality improved by less than 0.05 — the loop converged. This
+is correct behaviour if the KB was already well-populated for the topic.
+Reduce `autonomous_loop.quality_threshold` in `config.yaml` to force more
+iterations.
+
 ### Tests fail on first install
 
 ```bash
@@ -671,7 +796,7 @@ sandboxed eval; the exact exception type may vary by Python version.
 
 ---
 
-## 9. Extending the system
+## 10. Extending the system
 
 ### Adding a new agent role
 
@@ -734,6 +859,7 @@ dataclass already maps cleanly onto a `TypedDict`.
 ```bash
 # Setup (once)
 bash setup.sh                                  # or setup.ps1 on Windows
+pip install sse-starlette>=1.8.2               # SSE streaming support
 
 # Activate venv (every shell)
 source .venv/bin/activate                      # or .venv\Scripts\Activate.ps1
@@ -745,15 +871,27 @@ python run.py --healthcheck
 python run.py --ingest data/papers/
 python run.py --ingest ~/path/to/your/papers/
 
-# Run tasks
+# Standard tasks
 python run.py "Compute volatility of SPY 2020-2024"
 python run.py "Backtest 50/200 SMA crossover on SPY since 2015"
 python run.py "Write a 4-page report on the momentum anomaly"
-python run.py --kan-demo    # run the built-in generic Multifidelity KAN demo
+python run.py --kan-demo
+
+# Staged research (literature + hypothesis + experiment + KG)
+python run.py --research "Low-volatility anomaly in equity markets"
+python run.py --research "Momentum crashes" --n-papers 12
+
+# Autonomous iterative research loop
+python run.py --auto-research "GARCH volatility clustering" --iterations 3
+python run.py --auto-research "Factor investing emerging markets" --n-papers 8
+
+# Inspect KG and logs
+python run.py --kg-summary
+tail -f output/agent.log
 
 # Run web interface
-python -m uvicorn server:app --host 127.0.0.1 --port 8000    # start web server
-# Then open http://127.0.0.1:8000 in browser
+python -m uvicorn server:app --host 127.0.0.1 --port 8000
+# Then open http://127.0.0.1:8000
 
 # Tests
 pytest tests/test_risk.py tests/test_backtest.py    # fast, no models
@@ -761,4 +899,7 @@ pytest                                              # full suite
 
 # Inspect a saved run
 cat output/runs/run_0000.json | python -m json.tool | less
+
+# Read a research report
+cat output/tasks/<task_id>/research_report.md
 ```

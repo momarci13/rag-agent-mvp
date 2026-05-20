@@ -36,7 +36,8 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:api.github.com)",
       "Bash(pip install *)",
-      "Bash(pip show *)"
+      "Bash(pip show *)",
+      "Bash(Select-Object -ExpandProperty FullName)"
     ]
   }
 }

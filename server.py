@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+try:
+    from sse_starlette.sse import EventSourceResponse
+    _SSE_AVAILABLE = True
+except ImportError:
+    _SSE_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+# In-memory registry for background task progress
+_bg_tasks: dict[str, dict] = {}
 
 from run import load_config, make_llm_config, make_tools, run_kan_demo
 from agents.llm import LLMConfig, OllamaLLM
@@ -34,15 +47,24 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=ROOT / "web"), name="static")
 
 
-# Startup: run migration from legacy format
+# Startup: configure logging + run migration from legacy format
 @app.on_event("startup")
 async def startup_migration():
+    (ROOT / "output").mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(str(ROOT / "output" / "agent.log")),
+        ],
+    )
     try:
         migration_result = task_storage.migrate_legacy_runs()
         if migration_result["migrated"] > 0:
-            print(f"[STARTUP] Migrated {migration_result['migrated']} legacy tasks")
+            logger.info("[STARTUP] Migrated %d legacy tasks", migration_result["migrated"])
     except Exception as e:
-        print(f"[STARTUP] Migration warning: {e}")
+        logger.warning("[STARTUP] Migration warning: %s", e)
 
 
 def _config() -> dict[str, Any]:
@@ -118,6 +140,98 @@ def _save_run(state: Any) -> Path:
     return run_path
 
 
+# ── Background task worker functions ─────────────────────────────────────────
+
+def _run_task_background_sync(task_id: str, task_text: str, cfg: dict) -> None:
+    _bg_tasks[task_id] = {"status": "running", "progress": "Starting LLM pipeline..."}
+    try:
+        llm = _llm(cfg)
+        _bg_tasks[task_id]["progress"] = "Retrieving context..."
+        rag = _rag(cfg)
+        tools = make_tools(cfg)
+        from agents.graph import run
+        _bg_tasks[task_id]["progress"] = "Running analysis..."
+        state = run(task_text, llm, rag, max_iter=1, tools=tools)
+        _bg_tasks[task_id]["progress"] = "Saving results..."
+        saved_id = task_storage.save_task(state)
+        result = _build_task_response(state, saved_id)
+        _bg_tasks[task_id] = {"status": "completed", "result": result}
+        logger.info("[SERVER] run_task completed: bg_id=%s task_id=%s", task_id, saved_id)
+    except Exception as exc:
+        logger.exception("[SERVER] run_task background failed: %s", task_id)
+        _bg_tasks[task_id] = {"status": "failed", "error": str(exc)}
+
+
+def _run_research_background_sync(
+    task_id: str, task_text: str, n_papers: int, kg_enabled: bool, cfg: dict
+) -> None:
+    _bg_tasks[task_id] = {"status": "running", "progress": "Starting research pipeline..."}
+    try:
+        llm = _llm(cfg)
+        _bg_tasks[task_id]["progress"] = "Acquiring literature..."
+        rag = _rag(cfg)
+        tools = make_tools(cfg)
+        from agents.graph import research_run
+        research_cfg = cfg.get("research", {})
+        _bg_tasks[task_id]["progress"] = "Running research pipeline..."
+        state = research_run(
+            task_text, llm, rag,
+            max_iter=cfg["agent"]["max_iterations"],
+            tools=tools,
+            n_papers=n_papers or research_cfg.get("n_papers", 8),
+            kg_enabled=kg_enabled and research_cfg.get("kg_enabled", True),
+        )
+        _bg_tasks[task_id]["progress"] = "Saving results..."
+        saved_id = task_storage.save_task(state)
+        result = _build_task_response(state, saved_id)
+        _bg_tasks[task_id] = {"status": "completed", "result": result}
+        logger.info("[SERVER] research_task completed: bg_id=%s task_id=%s", task_id, saved_id)
+    except Exception as exc:
+        logger.exception("[SERVER] research_task background failed: %s", task_id)
+        _bg_tasks[task_id] = {"status": "failed", "error": str(exc)}
+
+
+def _run_autonomous_research_background_sync(
+    task_id: str, topic: str, n_iterations: int, n_papers_per_iter: int, cfg: dict
+) -> None:
+    _bg_tasks[task_id] = {"status": "running", "progress": "Starting autonomous research loop..."}
+    try:
+        from tools.research_loop import autonomous_research_loop
+        from tools.citation_dag import CitationDAG
+        llm = _llm(cfg)
+        rag = _rag(cfg)
+        dag = CitationDAG()
+        loop_cfg = cfg.get("autonomous_loop", {})
+        _bg_tasks[task_id]["progress"] = f"Running {n_iterations} research iterations..."
+        result = autonomous_research_loop(
+            topic=topic,
+            llm=llm,
+            rag=rag,
+            citation_dag=dag,
+            task_id=task_id,
+            n_iterations=n_iterations,
+            n_papers_per_iter=n_papers_per_iter,
+            quality_threshold=loop_cfg.get("quality_threshold", 0.4),
+        )
+        _bg_tasks[task_id] = {
+            "status": "completed",
+            "result": {
+                "task_id": task_id,
+                "topic": topic,
+                "total_papers": result.total_papers_ingested,
+                "iterations": len(result.iterations),
+                "dag_nodes": result.citation_dag_nodes,
+                "report_url": f"/api/tasks/{task_id}/research-report",
+            },
+        }
+        logger.info("[SERVER] Autonomous research completed: %s", task_id)
+    except Exception as exc:
+        logger.exception("[SERVER] Autonomous research failed: %s", task_id)
+        _bg_tasks[task_id] = {"status": "failed", "error": str(exc)}
+
+
+# ── Pydantic request models ───────────────────────────────────────────────────
+
 class TaskRequest(BaseModel):
     task: str
 
@@ -146,6 +260,17 @@ class ReRunRequest(BaseModel):
     code: str
 
 
+class ApproveSourcesRequest(BaseModel):
+    task_id: str
+    source_ids: list[str]
+
+
+class AutonomousResearchRequest(BaseModel):
+    topic: str
+    n_iterations: int = 3
+    n_papers_per_iter: int = 6
+
+
 @app.get("/", response_class=FileResponse)
 async def index():
     return ROOT / "web" / "index.html"
@@ -172,50 +297,30 @@ async def health() -> dict[str, Any]:
 
 
 @app.post("/run-task")
-async def run_task(payload: TaskRequest) -> dict[str, Any]:
+async def run_task(payload: TaskRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
     cfg = _config()
-    llm = _llm(cfg)
-    if not llm.health():
+    # Quick LLM health-check before queuing (fast, catches offline Ollama early)
+    if not _llm(cfg).health():
         raise HTTPException(500, "LLM is not healthy or unreachable.")
-
-    rag = _rag(cfg)
-    tools = make_tools(cfg)
-    try:
-        from agents.graph import run
-    except Exception as exc:
-        raise HTTPException(500, f"Agents graph unavailable: {exc}")
-
-    state = run(payload.task, llm, rag, max_iter=1, tools=tools)
-    task_id = task_storage.save_task(state)
-    return _build_task_response(state, task_id)
+    task_id = str(uuid4())
+    _bg_tasks[task_id] = {"status": "queued", "progress": "Task queued"}
+    background_tasks.add_task(_run_task_background_sync, task_id, payload.task, cfg)
+    return {"status": "queued", "task_id": task_id}
 
 
 @app.post("/research-task")
-async def research_task(payload: ResearchTaskRequest) -> dict[str, Any]:
+async def research_task(payload: ResearchTaskRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
     """Full staged research pipeline: literature + hypothesis + experiment + KG."""
     cfg = _config()
-    llm = _llm(cfg)
-    if not llm.health():
+    if not _llm(cfg).health():
         raise HTTPException(500, "LLM is not healthy or unreachable.")
-
-    rag = _rag(cfg)
-    tools = make_tools(cfg)
-
-    try:
-        from agents.graph import research_run
-    except Exception as exc:
-        raise HTTPException(500, f"Research pipeline unavailable: {exc}")
-
-    research_cfg = cfg.get("research", {})
-    state = research_run(
-        payload.task, llm, rag,
-        max_iter=cfg["agent"]["max_iterations"],
-        tools=tools,
-        n_papers=payload.n_papers or research_cfg.get("n_papers", 8),
-        kg_enabled=payload.kg_enabled and research_cfg.get("kg_enabled", True),
+    task_id = str(uuid4())
+    _bg_tasks[task_id] = {"status": "queued", "progress": "Research task queued"}
+    background_tasks.add_task(
+        _run_research_background_sync,
+        task_id, payload.task, payload.n_papers, payload.kg_enabled, cfg,
     )
-    task_id = task_storage.save_task(state)
-    return _build_task_response(state, task_id)
+    return {"status": "queued", "task_id": task_id}
 
 
 @app.get("/api/reports/{task_id}/pdf", response_class=FileResponse)
@@ -238,6 +343,74 @@ async def get_report_pdf(task_id: str):
                 )
 
     raise HTTPException(404, "PDF not found for this task (compilation may have failed)")
+
+
+@app.get("/api/tasks/{task_id}/stream")
+async def stream_task_progress(task_id: str):
+    """SSE endpoint streaming progress for a background task."""
+    if not _SSE_AVAILABLE:
+        raise HTTPException(
+            503,
+            "sse-starlette is not installed. "
+            "Run: pip install sse-starlette>=1.8.2",
+        )
+
+    async def event_generator():
+        while True:
+            meta = _bg_tasks.get(task_id)
+            if meta is None:
+                yield {
+                    "event": "progress",
+                    "data": json.dumps({"status": "unknown", "progress": "Waiting for task..."}),
+                }
+            elif meta["status"] == "completed":
+                yield {"event": "completed", "data": json.dumps(meta.get("result", {}))}
+                break
+            elif meta["status"] == "failed":
+                yield {
+                    "event": "failed",
+                    "data": json.dumps({"error": meta.get("error", "Unknown error")}),
+                }
+                break
+            else:
+                yield {
+                    "event": "progress",
+                    "data": json.dumps({
+                        "status": meta["status"],
+                        "progress": meta.get("progress", ""),
+                    }),
+                }
+            await asyncio.sleep(1.5)
+
+    return EventSourceResponse(event_generator())
+
+
+@app.get("/api/tasks/{task_id}/research-report")
+async def get_research_report(task_id: str):
+    """Serve the auto-generated markdown research report for a task."""
+    from tools.auto_report import load_report
+    content = load_report(task_id)
+    if content is None:
+        raise HTTPException(404, "Research report not found (not yet generated for this task)")
+    return PlainTextResponse(content, media_type="text/markdown")
+
+
+@app.post("/api/research/autonomous")
+async def autonomous_research(
+    payload: AutonomousResearchRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Start an autonomous iterative research loop (background)."""
+    cfg = _config()
+    if not _llm(cfg).health():
+        raise HTTPException(500, "LLM is not healthy or unreachable.")
+    task_id = str(uuid4())
+    _bg_tasks[task_id] = {"status": "queued", "progress": "Autonomous research queued"}
+    background_tasks.add_task(
+        _run_autonomous_research_background_sync,
+        task_id, payload.topic, payload.n_iterations, payload.n_papers_per_iter, cfg,
+    )
+    return {"status": "queued", "task_id": task_id}
 
 
 @app.get("/api/kg/summary")
@@ -366,19 +539,21 @@ async def add_task_message(task_id: str, payload: MessageRequest) -> dict[str, A
         llm = _llm(cfg)
         rag = _rag(cfg)
         
-        response, artifacts = task_conversation.process_user_message(
+        response, artifacts, discovered_sources = task_conversation.process_user_message(
             task_id=task_id,
             message_content=payload.content,
             llm=llm,
             rag=rag,
             iteration=payload.iteration,
         )
-        
+
         return {
             "status": "ok",
             "assistant_response": response,
             "new_artifacts": artifacts,
             "message_id": f"{task_id}_{payload.iteration}",
+            "task_id": task_id,
+            "discovered_sources": discovered_sources,
         }
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -427,6 +602,21 @@ async def re_run_artifact_api(task_id: str, artifact_id: str, payload: ReRunRequ
         raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(500, f"Failed to re-run artifact: {str(e)}")
+
+
+@app.post("/api/kb/approve")
+async def approve_sources(payload: ApproveSourcesRequest) -> dict[str, Any]:
+    """Ingest user-selected pending sources into the knowledge base."""
+    from tools import source_search
+    pending = source_search.load_pending_sources(payload.task_id)
+    approved_ids = set(payload.source_ids)
+    to_ingest = [s for s in pending if s.id in approved_ids]
+    if to_ingest:
+        cfg = _config()
+        rag = _rag(cfg)
+        rag.ingest_papers(to_ingest)
+    source_search.clear_pending_sources(payload.task_id)
+    return {"status": "ok", "ingested": len(to_ingest)}
 
 
 @app.post("/api/tasks/{task_id}/template")

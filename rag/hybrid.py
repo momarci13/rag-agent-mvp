@@ -10,11 +10,17 @@ Math:
 """
 from __future__ import annotations
 
+import logging
 import os
 import pickle
 import re
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    from agents.llm import OllamaLLM
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -158,28 +164,39 @@ class LiteHybridRAG:
                 print(f"Unknown reranking model: {self.reranking_model}")
                 self.reranker = None
         except Exception as e:
-            print(f"Failed to load reranker: {e}")
+            logger.warning("Failed to load reranker: %s", e)
             self.reranker = None
 
-    def _expand_query(self, query: str) -> list[str]:
-        """Expand the query with related terms."""
+    def _expand_query(self, query: str, llm: "OllamaLLM | None" = None) -> list[str]:
+        """Expand the query with related terms, optionally via LLM."""
         if not self.query_expansion_enabled:
             return [query]
 
-        expansions = [query]  # Always include original
+        expansions = [query]
+        method = self.query_expansion_method
 
         try:
-            if self.query_expansion_method == "local_model":
-                # Use simple rule-based expansion for now
-                # TODO: Integrate with Ollama for better expansion
-                expansions.extend(self._rule_based_expansion(query))
-            elif self.query_expansion_method == "cohere":
-                # TODO: Implement Cohere API expansion
-                pass
-        except Exception as e:
-            print(f"Query expansion failed: {e}")
+            # LLM-based expansion (preferred when available)
+            if llm is not None and "llm" in method:
+                from rag.query_expansion import expand_query_with_llm
+                variants = expand_query_with_llm(query, llm, n_variants=self.max_expansions)
+                expansions.extend(variants)
 
-        return expansions[:self.max_expansions + 1]  # +1 for original
+            # Rule-based expansion as supplement / fallback
+            if len(expansions) < self.max_expansions + 1:
+                expansions.extend(self._rule_based_expansion(query))
+        except Exception as exc:
+            logger.warning("Query expansion failed: %s", exc)
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for e in expansions:
+            if e not in seen:
+                seen.add(e)
+                unique.append(e)
+
+        return unique[:self.max_expansions + 1]
 
     def _rule_based_expansion(self, query: str) -> list[str]:
         """Simple rule-based query expansion."""
@@ -224,7 +241,7 @@ class LiteHybridRAG:
             return candidates[:self.top_k_after_rerank]
 
         except Exception as e:
-            print(f"Reranking failed: {e}")
+            logger.warning("Reranking failed: %s", e)
             return candidates
 
     # ---------------- ingestion ----------------
@@ -284,7 +301,7 @@ class LiteHybridRAG:
                 self.add(docs)
                 total_chunks += len(docs)
             except Exception as e:
-                print(f"[RAG] Skipping paper {getattr(paper, 'arxiv_id', '?')}: {e}")
+                logger.warning("[RAG] Skipping paper %s: %s", getattr(paper, 'arxiv_id', '?'), e)
                 continue
 
         return total_chunks
@@ -386,6 +403,7 @@ class LiteHybridRAG:
         m: int = 30,
         token_budget: int = 3500,
         metadata_filters: dict | None = None,
+        llm: "OllamaLLM | None" = None,
     ) -> list[dict]:
         """Retrieve top-k documents using hybrid dense+BM25 retrieval with optional query expansion and reranking.
         
@@ -405,8 +423,8 @@ class LiteHybridRAG:
         if not self._ids:
             return []
 
-        # Query expansion
-        expanded_queries = self._expand_query(query)
+        # Query expansion (LLM-assisted when llm is provided)
+        expanded_queries = self._expand_query(query, llm=llm)
         all_candidates = []
 
         for exp_query in expanded_queries:

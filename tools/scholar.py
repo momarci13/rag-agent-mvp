@@ -167,26 +167,29 @@ def scholar_augment_task(
     task_description: str,
     n_papers: int = 5,
     category: str = "q-fin",
+    llm=None,
 ) -> tuple[list[ArxivPaper], str]:
     """Search for papers relevant to a task.
+
+    Tries up to three progressively broader arXiv queries before giving up.
 
     Args:
         task_description: User's task description
         n_papers: Number of papers to fetch
         category: arXiv category ("q-fin", "cs.LG", "stat.AP", etc.)
+        llm: Optional LLM instance for LLM-based keyword extraction
 
     Returns:
         (list of papers, markdown context string for LLM)
     """
     try:
         print(f"[SCHOLAR] Analyzing task: '{task_description[:50]}...'")
-        keywords = extract_keywords(task_description)
+        keywords = extract_keywords(task_description, llm=llm)
 
         if not keywords:
             print("[SCHOLAR] No suitable keywords found in task description")
             return [], ""
 
-        query = " ".join(keywords[:5])
         keyset = set(keywords)
         math_terms = {
             "probability", "probabilistic", "bayesian", "bayes", "markov",
@@ -207,34 +210,46 @@ def scholar_augment_task(
         else:
             search_categories = DEFAULT_SEARCH_CATEGORIES
 
-        print(f"[SCHOLAR] Searching arXiv for: '{query}' in categories {search_categories}")
+        # Three progressive queries: full → top-3 → top-2
+        query_variants = [
+            " ".join(keywords[:5]),
+            " ".join(keywords[:3]),
+            " ".join(keywords[:2]),
+        ]
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique_queries = [q for q in query_variants if q not in seen and not seen.add(q)]  # type: ignore[func-returns-value]
 
-        papers = search_arxiv(
-            query=query,
-            n=n_papers,
-            category=search_categories,
-        )
+        papers: list[ArxivPaper] = []
+        used_query = unique_queries[0]
+        for query in unique_queries:
+            print(f"[SCHOLAR] Searching arXiv for: '{query}' in categories {search_categories}")
+            papers = search_arxiv(query=query, n=n_papers, category=search_categories)
+            if papers:
+                used_query = query
+                break
+            print(f"[SCHOLAR] No results for '{query}', trying broader query...")
 
         if not papers:
-            print(f"[SCHOLAR] No papers found for query '{query}' in category '{category}'")
+            print(f"[SCHOLAR] No papers found across all query variants")
             return [], ""
 
         print(f"[SCHOLAR] Successfully retrieved {len(papers)} papers")
-        for paper in papers[:3]:  # Show first 3 papers
+        for paper in papers[:3]:
             print(f"[SCHOLAR]   - {paper.title[:60]}... ({paper.arxiv_id})")
 
         context = f"""## Recently Retrieved Academic Papers (arXiv)
 
-The following {len(papers)} papers are relevant to your task (searched for: {query}):
+The following {len(papers)} papers are relevant to your task (searched for: {used_query}):
 
 """
         for i, paper in enumerate(papers, 1):
             authors_str = ", ".join(paper.authors[:2])
             if len(paper.authors) > 2:
                 authors_str += " et al."
-            context += f"""{i}. **{paper.title}**  
-   {authors_str}  
-   arXiv:{paper.arxiv_id} ({paper.published})  
+            context += f"""{i}. **{paper.title}**
+   {authors_str}
+   arXiv:{paper.arxiv_id} ({paper.published})
 
 """
 
@@ -245,18 +260,42 @@ The following {len(papers)} papers are relevant to your task (searched for: {que
         return [], ""
 
 
-def extract_keywords(text: str, max_keywords: int = 5) -> list[str]:
-    """Extract keywords from task description."""
+def extract_keywords(text: str, max_keywords: int = 5, llm=None) -> list[str]:
+    """Extract academic search keywords. LLM-first, regex fallback."""
+    if llm is not None:
+        try:
+            msgs = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract 3-5 academic search keywords from the task description "
+                        "suitable for finding papers on arXiv. Focus on domain concepts, "
+                        "methods, and models — not task-specific nouns like company names. "
+                        "Return only a comma-separated list, no explanation."
+                    ),
+                },
+                {"role": "user", "content": text[:400]},
+            ]
+            result = llm.chat(msgs, temperature=0.0)
+            kws = [k.strip().lower() for k in result.split(",") if k.strip()]
+            if 2 <= len(kws) <= 8:
+                print(f"[SCHOLAR] LLM keywords: {kws}")
+                return kws[:max_keywords]
+        except Exception:
+            pass
+
+    # Regex fallback
     stop_words = {
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
         "of", "with", "by", "from", "is", "are", "be", "have", "do", "run",
         "using", "use", "based", "compute", "calculate", "report", "write",
-        "you", "your", "python", "code", "task", "please", "help",
+        "you", "your", "python", "code", "task", "please", "help", "some",
+        "make", "give", "show", "want", "need", "can", "will", "get", "that",
+        "this", "these", "those", "also", "just", "like", "over", "such",
     }
-
     words = text.lower().split()
     keywords = [
-        w.strip(".,;:!?") for w in words
-        if w.strip(".,;:!?") not in stop_words and len(w.strip(".,;:!?")) > 3
+        w.strip(".,;:!?()[]") for w in words
+        if w.strip(".,;:!?()[]") not in stop_words and len(w.strip(".,;:!?()[]")) > 3
     ]
-    return list(set(keywords))[:max_keywords]
+    return list(dict.fromkeys(keywords))[:max_keywords]

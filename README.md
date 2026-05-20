@@ -1,6 +1,10 @@
-# ROG-Agent MVP
+# RAG-Agent MVP
+
+```bash
 python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000
-A laptop-grade **multi-agent RAG system** for data science, quantitative
+```
+
+A laptop-grade **autonomous research platform** for data science, quantitative
 trading research, and academic writing — running entirely on a local
 free LLM via Ollama.
 
@@ -28,13 +32,44 @@ to 4 GB VRAM or pure CPU.
 - **Hybrid RAG** — Chroma (dense, BGE-small embeddings) fused with BM25,
   greedy knapsack context packing under a token budget. Optional
   cross-encoder reranker (disabled by default to save VRAM).
+  - **LLM query expansion** — the model rewrites queries into 3 academic
+    variants before retrieval; falls back to rule-based synonyms.
+  - **Failure-driven KB expansion** — if retrieval quality falls below a
+    configurable threshold, the system automatically searches for and
+    ingests gap-filling papers.
+- **Multi-source paper discovery** across arXiv, OpenAlex (250 M works),
+  and Semantic Scholar. Discovered papers appear in a checkbox panel in
+  the web UI so you choose exactly what enters the KB.
+- **Persistent citation DAG** (NetworkX + JSON). After each search, the
+  system BFS-traverses up to 2 citation hops via OpenAlex and stores the
+  directed graph in `output/citation_dag.json`. PageRank and novelty
+  detection surface the most important unseen papers.
+- **Conversation memory compression** — threads longer than 20 messages
+  are summarised by the LLM and stored as a rolling `MemorySummary`,
+  preventing context-window blowup on long sessions.
+- **Cross-task semantic memory** — accepted artifact findings are embedded
+  and stored in Chroma with `kind=finding` metadata, enabling dense
+  retrieval of prior results across all past tasks.
+- **Structured research reports** auto-generated after every research
+  pipeline run: executive summary, key findings, paper table, open
+  questions, contradictions, next search directions.
+- **Non-blocking web server** — `/run-task` and `/research-task` return
+  `{status: "queued", task_id}` immediately; the browser opens a
+  Server-Sent Events stream and animates a live progress bar until the
+  task completes.
+- **Autonomous research loop** (`--auto-research` CLI flag or
+  `POST /api/research/autonomous`) — iterative
+  SEARCH → RETRIEVE → GAP-DETECT → EXPAND → REPORT cycle that keeps
+  running until knowledge-base quality converges.
 - **KB grows automatically**: accepted task artifacts are chunked and
-  ingested back into the RAG store; arXiv papers are fetched on each
-  iteration and persisted.
+  ingested back into the RAG store; papers fetched during research
+  iterations persist across sessions.
 - **Knowledge graph** (NetworkX + JSON) links papers, findings, and
   tasks across sessions for the staged research pipeline.
 - **Risk gates** on every trading decision: position concentration,
   leverage cap, turnover cap, 99 % historical VaR.
+- **Structured logging** throughout — every module emits to
+  `output/agent.log` via Python's standard `logging` module.
 - **Paper trading only by default.** Live execution requires an
   explicit env flag and is not wired into the agent loop.
 
@@ -44,21 +79,22 @@ to 4 GB VRAM or pure CPU.
         User task / follow-up message
             │
             ▼
-        ┌────────┐      ┌──────────────────────────────┐
-        │ PLAN   │◄────►│ Hybrid RAG                   │
-        └────┬───┘      │  Chroma + BM25               │◄─────────────┐
-             │          │  (BGE-small embeddings)      │              │
-   ┌─────────┼──────────┴──────────────────────────────┘              │
-   ▼         ▼          ▼                                              │
-┌─────┐  ┌──────┐   ┌──────┐                                          │
-│ DS  │  │QUANT │   │WRITE │   ← all the same Qwen2.5-7B model        │
-└──┬──┘  └──┬───┘   └──┬───┘     just different system prompts        │
-   │        │          │                                               │
-   ▼        ▼          ▼                                               │
-sandbox  backtest   LaTeX                                              │
-(stats)  (vector-   (validate        KB expansion:                    │
-         ized py)   citations)  accepted artifact chunks ─────────────┘
-   │        │          │        arXiv papers per iteration
+        ┌────────┐      ┌──────────────────────────────────────┐
+        │ PLAN   │◄────►│ Hybrid RAG                           │
+        └────┬───┘      │  Chroma (dense, BGE-small)           │◄──────────────────────┐
+             │          │  + BM25 (sparse)                     │                       │
+             │          │  + LLM query expansion               │◄── kind=finding ──────┤
+   ┌─────────┼──────────┴──────────────────────────────────────┘                       │
+   ▼         ▼          ▼                                                               │
+┌─────┐  ┌──────┐   ┌──────┐                                                           │
+│ DS  │  │QUANT │   │WRITE │   ← same Qwen2.5-7B, different system prompts             │
+└──┬──┘  └──┬───┘   └──┬───┘                                                           │
+   │        │          │                                                                │
+   ▼        ▼          ▼               KB expansion:                                   │
+sandbox  backtest   LaTeX         accepted artifact chunks ────────────────────────────┤
+(stats)  (vectorised (validate    multi-source papers (arXiv + OpenAlex + S2) ─────────┤
+          Python)   citations)    citation DAG 2-hop BFS ───────────────────────────────┤
+   │        │          │          semantic findings (cross-task) ────────────────────────┘
    └────────┼──────────┘
             ▼
         ┌────────┐
@@ -66,12 +102,17 @@ sandbox  backtest   LaTeX                                              │
         └────────┘
             │ accepted
             ▼
-   ┌─────────────────┐      ┌──────────────────────────┐
-   │  Task Storage   │      │  Knowledge Graph         │
-   │  (per-task      │      │  (cross-session links:   │
-   │  conversation   │      │  papers / findings /     │
-   │  + branching)   │      │  tasks)                  │
-   └─────────────────┘      └──────────────────────────┘
+   ┌─────────────────┐   ┌────────────────────────┐   ┌─────────────────────┐
+   │  Task Storage   │   │  Knowledge Graph        │   │  Research Report    │
+   │  (per-task      │   │  (cross-session links:  │   │  (auto-generated    │
+   │  conversation   │   │  papers / findings /    │   │  markdown + index)  │
+   │  + branching    │   │  tasks)                 │   │                     │
+   │  + memory       │   └────────────────────────┘   └─────────────────────┘
+   │  compression)   │
+   └─────────────────┘
+
+  Autonomous loop (--auto-research):
+  SEARCH → RETRIEVE → GAP-DETECT → EXPAND → REPORT  (×N iterations)
 ```
 
 ## Why these choices for laptop hardware
@@ -88,6 +129,9 @@ sandbox  backtest   LaTeX                                              │
   lines and zero install cost.
 - **CPU-side stats.** `statsmodels`, `scikit-learn`, `cvxpy` all run on
   CPU, leaving the GPU for the LLM only.
+- **SSE instead of WebSockets.** Server-Sent Events are one-way and
+  trivially supported by every modern browser with zero library overhead
+  on the client side.
 
 ## Quickstart
 
@@ -106,11 +150,10 @@ Then:
 
 ```bash
 python run.py --ingest data/papers/                                   # build KB (~30 s)
-python run.py --ingest data/papers/ --skip-existing                  # append only new content
-python run.py --ingest data/papers/ --chunk-tokens 300 --overlap-tokens 40
 python run.py "Backtest a 50/200 SMA crossover on SPY since 2015"     # ~1-3 min
-python run.py --kan-demo                                                # run a built-in multifidelity KAN demo
-python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000    # launch the local web UI
+python run.py --research "Low-volatility anomaly in equity markets"   # staged research
+python run.py --auto-research "GARCH volatility clustering" --iterations 3  # autonomous loop
+python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000    # launch web UI
 ```
 
 ## Repository layout
@@ -122,10 +165,10 @@ rag-agent-mvp/
 ├── WEB_SETUP.md             ← web server quick-start
 ├── requirements.txt
 ├── setup.sh / setup.ps1
-├── run.py                   ← CLI entrypoint
-├── server.py                ← FastAPI web server
+├── run.py                   ← CLI entrypoint (includes --auto-research)
+├── server.py                ← FastAPI web server (BackgroundTasks + SSE)
 ├── configs/
-│   └── config.yaml          ← model, RAG, risk, research knobs
+│   └── config.yaml          ← model, RAG, risk, research, loop knobs
 ├── agents/
 │   ├── llm.py               ← Ollama client w/ JSON mode
 │   ├── schemas.py           ← Pydantic models
@@ -133,9 +176,9 @@ rag-agent-mvp/
 │   ├── problem_decoder.py   ← structured task decomposition
 │   └── graph.py             ← state machine (run + research_run)
 ├── rag/
-│   ├── hybrid.py            ← Chroma + BM25 fusion
+│   ├── hybrid.py            ← Chroma + BM25 fusion (LLM query expansion)
 │   ├── ingest.py            ← PDF/MD/TeX/BibTeX loaders
-│   ├── query_expansion.py   ← optional query expansion
+│   ├── query_expansion.py   ← LLM-based + rule-based query rewriting
 │   └── metrics.py           ← retrieval eval helpers
 ├── tools/
 │   ├── sandbox.py           ← subprocess + rlimit code execution
@@ -144,6 +187,13 @@ rag-agent-mvp/
 │   ├── tex.py               ← citation validator + LaTeX build
 │   ├── data.py              ← multi-source market data fetcher
 │   ├── scholar.py           ← arXiv scholar augmentation
+│   ├── source_search.py     ← multi-source search (arXiv+OpenAlex+S2)
+│   ├── citation_dag.py      ← persistent N-hop citation graph (NetworkX)
+│   ├── auto_report.py       ← structured markdown research reports
+│   ├── memory.py            ← conversation compression (rolling summary)
+│   ├── semantic_memory.py   ← cross-task finding embeddings in Chroma
+│   ├── kb_expansion.py      ← failure-driven auto-expansion of the KB
+│   ├── research_loop.py     ← autonomous iterative research loop
 │   ├── literature.py        ← literature acquisition registry
 │   ├── analysis_pipeline.py ← data analysis pipeline
 │   ├── experiment.py        ← hypothesis experiment runner
@@ -152,18 +202,21 @@ rag-agent-mvp/
 │   ├── task_storage.py      ← task persistence + search + branching
 │   ├── fred.py              ← FRED macro data
 │   ├── ken_french.py        ← Fama-French factor data
-│   ├── openalex.py          ← OpenAlex literature search
+│   ├── openalex.py          ← OpenAlex literature search + citation fetch
 │   └── multifidelity_kan.py ← residual KAN model
 ├── kg/
 │   └── graph.py             ← knowledge graph (papers/findings/tasks)
-├── web/                     ← static frontend (vanilla JS)
+├── web/                     ← static frontend (vanilla JS + SSE client)
 ├── data/
 │   ├── papers/              ← seed docs: refs.bib, quant_basics.md, …
 │   └── market/              ← yfinance cache
 ├── kb/                      ← Chroma + BM25 index (gitignored)
 ├── output/
 │   ├── runs/                ← legacy CLI run snapshots
-│   └── tasks/               ← per-task directories (conversations, artifacts)
+│   ├── tasks/               ← per-task dirs (conversations, artifacts, reports)
+│   ├── research_reports/    ← auto-generated markdown research reports
+│   ├── citation_dag.json    ← persistent citation graph
+│   └── agent.log            ← structured application log
 ├── examples/EXAMPLES.md     ← copy-paste tasks
 └── tests/
     ├── test_risk.py

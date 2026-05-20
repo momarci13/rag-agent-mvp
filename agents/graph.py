@@ -5,6 +5,7 @@ while-loop does the same job in 80 lines with zero install cost.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -16,6 +17,8 @@ from .llm import OllamaLLM
 from . import roles
 from .problem_decoder import decode_problem, validate_requirements
 from tools import scholar
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -84,12 +87,12 @@ def run(
     state = RunState(task=task)
 
     # 0. DECODE PROBLEM
-    docs_for_decoding = rag.retrieve(task, k=3)  # Quick retrieval for context
+    docs_for_decoding = rag.retrieve(task, k=3, llm=llm)
     decoding = decode_problem(llm, task, docs_for_decoding)
     validation_warnings = validate_requirements(decoding)
     if validation_warnings:
-        print(f"[GRAPH] Decoding warnings: {validation_warnings}")
-    state.decoding = decoding  # Add to state for later use
+        logger.info("[GRAPH] Decoding warnings: %s", validation_warnings)
+    state.decoding = decoding
 
     # 1. PLAN
     p = roles.plan(llm, task)
@@ -99,26 +102,51 @@ def run(
     # 1.5. SCHOLAR AUGMENTATION: Search arXiv for relevant papers
     papers, scholar_context = [], ""
     try:
-        papers, scholar_context = scholar.scholar_augment_task(task, n_papers=5)
+        papers, scholar_context = scholar.scholar_augment_task(task, n_papers=5, llm=llm)
         if papers:
             chunks_added = rag.ingest_papers(papers)
-            print(f"[GRAPH] Ingested {len(papers)} papers ({chunks_added} chunks) into KB")
+            logger.info("[GRAPH] Ingested %d papers (%d chunks) into KB", len(papers), chunks_added)
         else:
-            print("[GRAPH] No relevant papers found for scholar augmentation")
+            logger.info("[GRAPH] No relevant papers found for scholar augmentation")
     except Exception as e:
-        print(f"[GRAPH] Scholar augmentation failed, continuing without it: {e}")
+        logger.warning("[GRAPH] Scholar augmentation failed, continuing without it: %s", e)
         scholar_context = ""
+
+    # 1.6. Recall prior findings from semantic memory
+    prior_findings_doc: dict | None = None
+    try:
+        from tools.semantic_memory import recall_prior_findings
+        prior_docs = recall_prior_findings(task, rag, k=3)
+        if prior_docs:
+            prior_text = "\n\n".join(d["text"] for d in prior_docs)
+            prior_findings_doc = {
+                "id": "prior_findings",
+                "text": f"## Prior research findings on related topics:\n\n{prior_text}",
+                "meta": {"kind": "memory", "source": "semantic_memory"},
+            }
+            logger.info("[GRAPH] Recalled %d prior findings from semantic memory", len(prior_docs))
+    except Exception as exc:
+        logger.debug("[GRAPH] Semantic memory recall skipped: %s", exc)
 
     while state.iterations < max_iter and not state.accepted:
         state.iterations += 1
-        docs = rag.retrieve(task, k=6)
-        
-        # Add scholar context if available
+        docs = rag.retrieve(task, k=6, llm=llm)
+
+        # Expand KB automatically if retrieval quality is low
+        try:
+            from tools.kb_expansion import expand_kb_on_weak_retrieval
+            docs, _expanded = expand_kb_on_weak_retrieval(task, docs, rag, llm, state.task_id)
+        except Exception as exc:
+            logger.debug("[GRAPH] KB expansion skipped: %s", exc)
+
+        # Prepend prior findings and scholar context
+        if prior_findings_doc:
+            docs.insert(0, prior_findings_doc)
         if scholar_context:
             docs.insert(0, {
                 "id": "scholar_context",
                 "text": scholar_context,
-                "meta": {"kind": "scholar", "source": "arxiv_dynamic"}
+                "meta": {"kind": "scholar", "source": "arxiv_dynamic"},
             })
 
         # 2. EXECUTE according to task type
@@ -220,6 +248,12 @@ def run(
         # Feed accepted artifact back into RAG for KB expansion
         if state.accepted:
             _ingest_artifact_into_rag(state.artifacts[-1], state, rag)
+            # Store findings in cross-task semantic memory
+            try:
+                from tools.semantic_memory import ingest_artifact_findings
+                ingest_artifact_findings(state.artifacts[-1], state, rag)
+            except Exception as exc:
+                logger.debug("[GRAPH] Semantic memory ingest skipped: %s", exc)
 
     return state
 
@@ -249,27 +283,27 @@ def research_run(
     state = RunState(task=task, tags=["research"])
 
     # ── Stage 0: decode ──────────────────────────────────────────────────────
-    docs_decode = rag.retrieve(task, k=3)
+    docs_decode = rag.retrieve(task, k=3, llm=llm)
     decoding = decode_problem(llm, task, docs_decode)
     validation_warnings = validate_requirements(decoding)
     if validation_warnings:
-        print(f"[RESEARCH] Decoding warnings: {validation_warnings}")
+        logger.info("[RESEARCH] Decoding warnings: %s", validation_warnings)
     state.decoding = decoding
 
     # ── Stage 1: Literature ───────────────────────────────────────────────────
-    print("[RESEARCH] Stage 1: Literature acquisition...")
+    logger.info("[RESEARCH] Stage 1: Literature acquisition...")
     papers: list = []
     lit_ctx = ""
     try:
         papers, skipped = acquire_literature(task, n_papers=n_papers, skip_known=True, rag=rag)
         lit_ctx = literature_context(papers)
         state.tags.append(f"papers:{len(papers)}")
-        print(f"[RESEARCH] {len(papers)} new papers acquired, {len(skipped)} already known")
+        logger.info("[RESEARCH] %d new papers acquired, %d already known", len(papers), len(skipped))
     except Exception as e:
-        print(f"[RESEARCH] Literature acquisition failed (continuing): {e}")
+        logger.warning("[RESEARCH] Literature acquisition failed (continuing): %s", e)
 
     # ── Stage 2: Plan + Gap analysis + Hypotheses ─────────────────────────────
-    print("[RESEARCH] Stage 2: Plan + Hypothesis formation...")
+    logger.info("[RESEARCH] Stage 2: Plan + Hypothesis formation...")
     p = roles.plan(llm, task)
     state.task_type = p.task_type
     state.subtasks = p.subtasks
@@ -277,12 +311,12 @@ def research_run(
     gap_analysis = None
     hypotheses = None
     try:
-        lit_docs = rag.retrieve(task + " " + " ".join(p.subtasks[:3]), k=8)
+        lit_docs = rag.retrieve(task + " " + " ".join(p.subtasks[:3]), k=8, llm=llm)
         gap_analysis = roles.analyze_literature_gaps(llm, task, lit_docs, lit_ctx)
         hypotheses = roles.form_hypotheses(llm, task, gap_analysis)
-        print(f"[RESEARCH] Primary hypothesis: {hypotheses.primary[:80]}...")
+        logger.info("[RESEARCH] Primary hypothesis: %s...", (hypotheses.primary[:80] if hypotheses else "none"))
     except Exception as e:
-        print(f"[RESEARCH] Gap analysis / hypothesis formation failed (continuing): {e}")
+        logger.warning("[RESEARCH] Gap analysis / hypothesis formation failed (continuing): %s", e)
 
     # Store Stage 1+2 as a literature artifact
     state.artifacts.append({
@@ -298,21 +332,46 @@ def research_run(
     })
 
     # ── Stage 3: Execute ──────────────────────────────────────────────────────
-    print(f"[RESEARCH] Stage 3: Execute ({state.task_type})...")
+    logger.info("[RESEARCH] Stage 3: Execute (%s)...", state.task_type)
 
     # Scholar augmentation (same as in `run`)
     scholar_context = ""
     try:
-        from tools import scholar
-        arxiv_papers, scholar_context = scholar.scholar_augment_task(task, n_papers=3)
+        from tools import scholar as _scholar
+        arxiv_papers, scholar_context = _scholar.scholar_augment_task(task, n_papers=3, llm=llm)
         if arxiv_papers:
             rag.ingest_papers(arxiv_papers)
     except Exception as e:
-        print(f"[RESEARCH] Scholar augmentation skipped: {e}")
+        logger.warning("[RESEARCH] Scholar augmentation skipped: %s", e)
+
+    # Recall prior findings from semantic memory
+    prior_findings_doc_r: dict | None = None
+    try:
+        from tools.semantic_memory import recall_prior_findings
+        prior_docs_r = recall_prior_findings(task, rag, k=3)
+        if prior_docs_r:
+            prior_text_r = "\n\n".join(d["text"] for d in prior_docs_r)
+            prior_findings_doc_r = {
+                "id": "prior_findings",
+                "text": f"## Prior research findings on related topics:\n\n{prior_text_r}",
+                "meta": {"kind": "memory", "source": "semantic_memory"},
+            }
+    except Exception as exc:
+        logger.debug("[RESEARCH] Semantic memory recall skipped: %s", exc)
 
     while state.iterations < max_iter and not state.accepted:
         state.iterations += 1
-        docs = rag.retrieve(task, k=6)
+        docs = rag.retrieve(task, k=6, llm=llm)
+
+        # Expand KB automatically if retrieval quality is low
+        try:
+            from tools.kb_expansion import expand_kb_on_weak_retrieval
+            docs, _expanded = expand_kb_on_weak_retrieval(task, docs, rag, llm, state.task_id)
+        except Exception as exc:
+            logger.debug("[RESEARCH] KB expansion skipped: %s", exc)
+
+        if prior_findings_doc_r:
+            docs.insert(0, prior_findings_doc_r)
         if scholar_context:
             docs.insert(0, {
                 "id": "scholar_context",
@@ -421,17 +480,30 @@ def research_run(
         # Feed accepted artifact back into RAG for KB expansion
         if state.accepted:
             _ingest_artifact_into_rag(state.artifacts[-1], state, rag)
+            # Store findings in cross-task semantic memory
+            try:
+                from tools.semantic_memory import ingest_artifact_findings
+                ingest_artifact_findings(state.artifacts[-1], state, rag)
+            except Exception as exc:
+                logger.debug("[RESEARCH] Semantic memory ingest skipped: %s", exc)
 
     # ── Stage 4: Knowledge graph ──────────────────────────────────────────────
     if kg_enabled:
-        print("[RESEARCH] Stage 4: Updating knowledge graph...")
+        logger.info("[RESEARCH] Stage 4: Updating knowledge graph...")
         try:
             from kg.graph import ResearchKnowledgeGraph
             kg = ResearchKnowledgeGraph()
             kg.ingest_run_state(state, papers=papers)
-            print(f"[RESEARCH] {kg.summarize()}")
+            logger.info("[RESEARCH] %s", kg.summarize())
         except Exception as e:
-            print(f"[RESEARCH] Knowledge graph update failed (non-critical): {e}")
+            logger.warning("[RESEARCH] Knowledge graph update failed (non-critical): %s", e)
+
+    # ── Stage 5: Auto-generate research report ────────────────────────────────
+    try:
+        from tools.auto_report import generate_research_report
+        generate_research_report(state, papers, llm)
+    except Exception as exc:
+        logger.warning("[RESEARCH] Auto-report generation failed (non-critical): %s", exc)
 
     return state
 
@@ -550,9 +622,9 @@ def _ingest_artifact_into_rag(artifact: dict, state: "RunState", rag: LiteHybrid
         ]
         if new_docs:
             rag.add(new_docs)
-            print(f"[GRAPH] Ingested {len(new_docs)} chunks from accepted artifact into RAG")
+            logger.info("[GRAPH] Ingested %d chunks from accepted artifact into RAG", len(new_docs))
     except Exception as e:
-        print(f"[GRAPH] Artifact RAG ingest failed (non-critical): {e}")
+        logger.warning("[GRAPH] Artifact RAG ingest failed (non-critical): %s", e)
 
 
 def _extract_bibtex_from_rag(rag: LiteHybridRAG) -> str:
@@ -750,7 +822,7 @@ def _attach_narrative_report(
             try:
                 pdf_result = tools["latex_build"](report_tex)
             except Exception as e:
-                print(f"[GRAPH] PDF compilation failed (non-critical): {e}")
+                logger.warning("[GRAPH] PDF compilation failed (non-critical): %s", e)
 
         artifact["report"] = {
             "narrative": narrative.model_dump(),
@@ -758,4 +830,4 @@ def _attach_narrative_report(
             "pdf": pdf_result,
         }
     except Exception as e:
-        print(f"[GRAPH] Narrative generation failed (non-critical): {e}")
+        logger.warning("[GRAPH] Narrative generation failed (non-critical): %s", e)

@@ -223,6 +223,10 @@ def main():
     ap.add_argument("--kan-demo", action="store_true", help="Run a built-in Multifidelity KAN demo")
     ap.add_argument("--research", action="store_true",
                     help="Full staged research pipeline (literature + hypothesis + experiment + KG)")
+    ap.add_argument("--auto-research", action="store_true",
+                    help="Autonomous iterative research loop (SEARCH→GAP-DETECT→EXPAND→REPORT)")
+    ap.add_argument("--iterations", type=int, default=None,
+                    help="Number of iterations for --auto-research (default: from config)")
     ap.add_argument("--n-papers", type=int, default=None,
                     help="Number of arXiv papers to acquire in research mode")
     ap.add_argument("--no-kg", action="store_true",
@@ -235,6 +239,17 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+
+    import logging
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(str(Path(args.out) / "agent.log")),
+        ],
+    )
 
     if args.healthcheck:
         sys.exit(healthcheck(cfg))
@@ -334,6 +349,38 @@ def main():
 
     tools = make_tools(cfg)
     max_iter = args.max_iter or cfg["agent"]["max_iterations"]
+
+    if args.auto_research:
+        from tools.research_loop import autonomous_research_loop
+        from tools.citation_dag import CitationDAG
+        loop_cfg = cfg.get("autonomous_loop", {})
+        n_iter = args.iterations or loop_cfg.get("n_iterations", 3)
+        n_papers_per_iter = args.n_papers or loop_cfg.get("n_papers_per_iter", 6)
+        print(f"\n>> Autonomous research: {args.task}")
+        print(f"   iterations={n_iter}  papers_per_iter={n_papers_per_iter}\n")
+        dag = CitationDAG()
+        result = autonomous_research_loop(
+            topic=args.task,
+            llm=llm,
+            rag=rag,
+            citation_dag=dag,
+            n_iterations=n_iter,
+            n_papers_per_iter=n_papers_per_iter,
+            quality_threshold=loop_cfg.get("quality_threshold", 0.4),
+        )
+        print("=" * 60)
+        print(f"Topic     : {result.topic}")
+        print(f"Task ID   : {result.task_id}")
+        print(f"Iterations: {len(result.iterations)}")
+        print(f"Papers    : {result.total_papers_ingested}")
+        print(f"DAG nodes : {result.citation_dag_nodes}")
+        for it in result.iterations:
+            print(f"  iter={it.iteration}  quality={it.quality_score:.3f}  "
+                  f"new_papers={it.papers_found}  gaps={it.gaps_detected}")
+        if result.final_report:
+            report_path = (Path(args.out) / "tasks" / result.task_id / "research_report.md")
+            print(f"\nReport    : {report_path}")
+        return
 
     if args.research:
         research_cfg = cfg.get("research", {})

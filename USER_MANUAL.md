@@ -202,14 +202,67 @@ The server serves static files from the `web/` directory and provides REST endpo
 
 ### API endpoints
 
-- `GET /health`: System health check (LLM, RAG status).
-- `POST /run-task`: Execute a task (accepts `{"task": "description"}`).
-- `GET /runs`: List saved run files.
-- `GET /runs/{filename}`: Retrieve a specific run's details.
-- `POST /ingest`: Ingest documents (accepts `{"path": "path/to/files"}`).
-- `POST /kan-demo`: Run the KAN demo.
+**Task execution**
+- `GET /health` — LLM + RAG health check.
+- `POST /run-task` — Run a standard agent task (`{"task": "..."}`).
+- `POST /research-task` — Full staged research pipeline (`{"task": "...", "n_papers": 8, "kg_enabled": true}`).
+- `POST /ingest` — Ingest a file or directory (`{"path": "..."}`).
+- `GET /kan-demo` — Run the built-in KAN demo.
+
+**Task management (persistent storage)**
+- `GET /api/tasks` — List all tasks (`?limit=50&offset=0&sort_by=-updated_at`).
+- `GET /api/tasks/{task_id}` — Get full task with all messages and artifacts.
+- `GET /api/tasks/search?q=...` — Keyword search across task titles and tags.
+- `POST /api/tasks/{task_id}/messages` — Send a follow-up message to a task (`{"content": "...", "iteration": 0}`). Returns assistant response and any new artifacts.
+- `POST /api/tasks/{task_id}/branch` — Branch a task from a given iteration (`{"branch_name": "...", "from_iteration": 1}`).
+- `POST /api/tasks/{task_id}/artifacts/{artifact_id}/re-run` — Re-execute artifact code after editing (`{"code": "..."}`).
+- `POST /api/tasks/{task_id}/template` — Export a task as a reusable template.
+
+**Reports and knowledge**
+- `GET /api/reports/{task_id}/pdf` — Download the compiled PDF for a task.
+- `GET /api/kg/summary` — Knowledge graph summary (papers, findings, linked tasks).
+- `GET /api/literature/registry` — Literature acquisition registry stats.
+
+**Legacy**
+- `GET /runs` — List legacy CLI run files in `output/runs/`.
+- `GET /runs/{filename}` — Retrieve a legacy run by filename.
 
 The web interface is fully client-side JavaScript with no external dependencies.
+
+---
+
+## 3.6 Multi-turn conversations and branching
+
+Each task is a persistent chatblock. After a task runs, you can continue refining it without starting over.
+
+### Sending a follow-up message (API)
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/messages \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Refine the signal to use EMA instead of SMA"}'
+```
+
+The system classifies the message automatically:
+- **Question** — answered from RAG context, no re-execution.
+- **Refinement** — re-runs the appropriate role function with the prior artifact as context; returns a new artifact.
+- **New iteration** — fetches fresh arXiv papers, adds them to the KB, then re-executes the full role pipeline.
+
+### Branching a task
+
+Branch from any iteration to try a different approach while preserving the original:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/branch \
+  -H "Content-Type: application/json" \
+  -d '{"branch_name": "ema-variant", "from_iteration": 1}'
+```
+
+The branch inherits only the artifacts from iterations before `from_iteration` and is independent of the original from that point.
+
+### KB expansion
+
+Every time a task is accepted, its artifact (code + output, strategy spec, or LaTeX) is chunked and ingested into the RAG store. New arXiv papers fetched during iterations also persist in the KB. This means subsequent tasks automatically benefit from prior results — no manual `--ingest` required.
 
 ---
 
@@ -218,26 +271,31 @@ The web interface is fully client-side JavaScript with no external dependencies.
 ### The pipeline
 
 ```
-USER TASK
+USER TASK  (or follow-up message via /api/tasks/{id}/messages)
    │
    ▼
 PLAN  ── classify into: data_science | trading_research | writing | mixed
+   │
+   ▼
+SCHOLAR  ── fetch relevant arXiv papers → ingest into KB (async, per iteration)
    │
    ▼
 RAG retrieve  ── hybrid (BM25 + dense), top-k under token budget
    │
    ▼
 EXECUTE role appropriate to task type:
-   • data_science      → DS prompt → code (Python/R) → sandbox.run_py (Python only)
+   • data_science      → DS prompt → code (Python/R) → sandbox.run_py
    • trading_research  → QUANT prompt → StrategySpec JSON → backtest
    • writing           → outline → per-section drafts → LaTeX assemble
    │
    ▼
 CRITIC  ── grounded? numerics_ok? code_runs?
    │
-   ├── accept = True  → done
+   ├── accept = True  → save task → ingest artifact into KB → done
    └── accept = False → revise (max_iter times)
 ```
+
+For the staged **research pipeline** (`--research` / `POST /research-task`), an additional `LITERATURE_ANALYST` → `HYPOTHESIS_FORMER` → `NARRATOR` chain runs before the executor, and the knowledge graph is updated after acceptance.
 
 ### Anatomy of a trading task
 

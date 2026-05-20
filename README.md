@@ -12,8 +12,10 @@ to 4 GB VRAM or pure CPU.
 
 - **Plan → Execute → Critique** pipeline driven by a small typed state
   machine (no LangGraph dependency).
-- **Three executor roles** sharing one warm model via system-prompt
-  switching:
+- **Multi-turn conversations** per task: follow-up messages refine or
+  extend the previous artifact; each task is its own chatblock. Tasks
+  can be branched from any prior iteration.
+- **Eight roles** sharing one warm model via system-prompt switching:
   - *Data Science* — pandas/statsmodels code generation, sandboxed
     execution, structured output. Supports Python and R code generation.
   - *Trading Research* — produces typed `StrategySpec` JSON, runs an
@@ -21,9 +23,16 @@ to 4 GB VRAM or pure CPU.
     Sharpe** / MDD / VaR.
   - *Academic Writer* — outline + section drafting + LaTeX assembly,
     with citation validation against your `refs.bib`.
+  - *Planner, Critic, Narrator, Literature Analyst, Hypothesis Former* —
+    supporting roles for research pipelines and evaluation.
 - **Hybrid RAG** — Chroma (dense, BGE-small embeddings) fused with BM25,
-  greedy knapsack context packing under a token budget. No reranker
-  (saves VRAM).
+  greedy knapsack context packing under a token budget. Optional
+  cross-encoder reranker (disabled by default to save VRAM).
+- **KB grows automatically**: accepted task artifacts are chunked and
+  ingested back into the RAG store; arXiv papers are fetched on each
+  iteration and persisted.
+- **Knowledge graph** (NetworkX + JSON) links papers, findings, and
+  tasks across sessions for the staged research pipeline.
 - **Risk gates** on every trading decision: position concentration,
   leverage cap, turnover cap, 99 % historical VaR.
 - **Paper trading only by default.** Live execution requires an
@@ -32,29 +41,37 @@ to 4 GB VRAM or pure CPU.
 ## Architecture
 
 ```
-        User task
+        User task / follow-up message
             │
             ▼
-        ┌────────┐      ┌──────────────────────────┐
-        │ PLAN   │◄────►│ Hybrid RAG               │
-        └────┬───┘      │  Chroma + BM25           │
-             │          │  (BGE-small embeddings)  │
-   ┌─────────┼──────────┴──────────────────────────┘
-   ▼         ▼          ▼
-┌─────┐  ┌──────┐   ┌──────┐
-│ DS  │  │QUANT │   │WRITE │   ← all the same Qwen2.5-7B model
-└──┬──┘  └──┬───┘   └──┬───┘     just different system prompts
-   │        │          │
-   ▼        ▼          ▼
-sandbox  backtest   LaTeX
-(stats)  (vector-   (validate
-         ized py)   citations)
-   │        │          │
+        ┌────────┐      ┌──────────────────────────────┐
+        │ PLAN   │◄────►│ Hybrid RAG                   │
+        └────┬───┘      │  Chroma + BM25               │◄─────────────┐
+             │          │  (BGE-small embeddings)      │              │
+   ┌─────────┼──────────┴──────────────────────────────┘              │
+   ▼         ▼          ▼                                              │
+┌─────┐  ┌──────┐   ┌──────┐                                          │
+│ DS  │  │QUANT │   │WRITE │   ← all the same Qwen2.5-7B model        │
+└──┬──┘  └──┬───┘   └──┬───┘     just different system prompts        │
+   │        │          │                                               │
+   ▼        ▼          ▼                                               │
+sandbox  backtest   LaTeX                                              │
+(stats)  (vector-   (validate        KB expansion:                    │
+         ized py)   citations)  accepted artifact chunks ─────────────┘
+   │        │          │        arXiv papers per iteration
    └────────┼──────────┘
             ▼
         ┌────────┐
         │ CRITIC │  ── revise once if not accepted
         └────────┘
+            │ accepted
+            ▼
+   ┌─────────────────┐      ┌──────────────────────────┐
+   │  Task Storage   │      │  Knowledge Graph         │
+   │  (per-task      │      │  (cross-session links:   │
+   │  conversation   │      │  papers / findings /     │
+   │  + branching)   │      │  tasks)                  │
+   └─────────────────┘      └──────────────────────────┘
 ```
 
 ## Why these choices for laptop hardware
@@ -64,8 +81,9 @@ sandbox  backtest   LaTeX
   instead of 30 s of swap.
 - **Chroma over Qdrant.** Single-file SQLite store, no server, no
   Docker.
-- **No cross-encoder reranker.** Costs ~300 MB VRAM for a marginal
-  gain on a personal-scale corpus.
+- **Cross-encoder reranker optional.** Disabled by default (saves
+  ~300 MB VRAM); enable in `configs/config.yaml` on machines with
+  headroom.
 - **No LangGraph.** A typed `dataclass` state and a `while` loop is 80
   lines and zero install cost.
 - **CPU-side stats.** `statsmodels`, `scikit-learn`, `cvxpy` all run on
@@ -98,31 +116,54 @@ python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000    # launch t
 ## Repository layout
 
 ```
-rog-agent-mvp/
+rag-agent-mvp/
 ├── README.md                ← you are here
 ├── USER_MANUAL.md           ← setup, troubleshooting, math reference
+├── WEB_SETUP.md             ← web server quick-start
 ├── requirements.txt
 ├── setup.sh / setup.ps1
 ├── run.py                   ← CLI entrypoint
+├── server.py                ← FastAPI web server
 ├── configs/
-│   └── config.yaml          ← model, RAG, risk knobs
+│   └── config.yaml          ← model, RAG, risk, research knobs
 ├── agents/
 │   ├── llm.py               ← Ollama client w/ JSON mode
 │   ├── schemas.py           ← Pydantic models
-│   ├── roles.py             ← 5 role prompts + typed helpers
-│   └── graph.py             ← state machine
+│   ├── roles.py             ← 8 role prompts + typed helpers
+│   ├── problem_decoder.py   ← structured task decomposition
+│   └── graph.py             ← state machine (run + research_run)
 ├── rag/
-│   ├── hybrid.py            ← Chroma + BM25
-│   └── ingest.py            ← PDF/MD/TeX/BibTeX loaders
+│   ├── hybrid.py            ← Chroma + BM25 fusion
+│   ├── ingest.py            ← PDF/MD/TeX/BibTeX loaders
+│   ├── query_expansion.py   ← optional query expansion
+│   └── metrics.py           ← retrieval eval helpers
 ├── tools/
-│   ├── sandbox.py           ← subprocess + rlimit
+│   ├── sandbox.py           ← subprocess + rlimit code execution
 │   ├── risk.py              ← Sharpe, DSR, Kelly, VaR, MVO
 │   ├── backtest.py          ← event-driven backtester
-│   └── tex.py               ← citation validator + LaTeX build
+│   ├── tex.py               ← citation validator + LaTeX build
+│   ├── data.py              ← multi-source market data fetcher
+│   ├── scholar.py           ← arXiv scholar augmentation
+│   ├── literature.py        ← literature acquisition registry
+│   ├── analysis_pipeline.py ← data analysis pipeline
+│   ├── experiment.py        ← hypothesis experiment runner
+│   ├── report.py            ← LaTeX report builder
+│   ├── task_conversation.py ← multi-turn conversation handler
+│   ├── task_storage.py      ← task persistence + search + branching
+│   ├── fred.py              ← FRED macro data
+│   ├── ken_french.py        ← Fama-French factor data
+│   ├── openalex.py          ← OpenAlex literature search
+│   └── multifidelity_kan.py ← residual KAN model
+├── kg/
+│   └── graph.py             ← knowledge graph (papers/findings/tasks)
+├── web/                     ← static frontend (vanilla JS)
 ├── data/
-│   ├── papers/              ← seed: refs.bib, quant_basics.md
-│   └── market/              ← yfinance cache lands here
-├── kb/                      ← Chroma persistent dir (gitignored)
+│   ├── papers/              ← seed docs: refs.bib, quant_basics.md, …
+│   └── market/              ← yfinance cache
+├── kb/                      ← Chroma + BM25 index (gitignored)
+├── output/
+│   ├── runs/                ← legacy CLI run snapshots
+│   └── tasks/               ← per-task directories (conversations, artifacts)
 ├── examples/EXAMPLES.md     ← copy-paste tasks
 └── tests/
     ├── test_risk.py

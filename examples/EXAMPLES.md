@@ -50,13 +50,51 @@ python run.py "Write a methods section explaining fractional Kelly position sizi
 python run.py "Compute the rolling 1-year Sharpe ratio of SPY from 2010 to 2024 and write a short report (about 800 words) discussing the regimes you observe, with a chart."
 ```
 
+## 5. Staged research pipeline
+
+Use `--research` to trigger the full literature → hypothesis → experiment → knowledge-graph pipeline. Requires internet (arXiv).
+
+```bash
+python run.py --research "What is the empirical evidence for low-volatility anomaly in equity markets?"
+python run.py --research "Momentum crashes: causes, magnitude, and mitigation strategies" --n-papers 12
+python run.py --research "Machine learning for cross-sectional return prediction" --no-kg
+```
+
+## 6. Knowledge graph
+
+```bash
+python run.py --kg-summary     # print papers, findings, and tasks in the KG
+```
+
+## 7. Multi-turn follow-ups (web API)
+
+After a task runs, send follow-up messages via the API. The `task_id` is returned by `/run-task`.
+
+```bash
+# Ask a clarifying question (answered from RAG, no re-execution)
+curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/messages \
+  -H "Content-Type: application/json" \
+  -d '{"content": "What does the Deflated Sharpe ratio measure?"}'
+
+# Request a refinement (re-runs the role with prior code as context)
+curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/messages \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Change the signal to use EMA(12)/EMA(26) instead of SMA"}'
+
+# Branch from iteration 1 to try a different approach
+curl -X POST http://127.0.0.1:8000/api/tasks/<task_id>/branch \
+  -H "Content-Type: application/json" \
+  -d '{"branch_name": "ema-variant", "from_iteration": 1}'
+```
+
 ## Tips
 
 - The first run after `ollama serve` is slow (model load, ~30-60 s). Subsequent runs reuse the loaded model.
 - If a task fails the critic on iteration 1, the agent retries once. Set `--max-iter 1` to disable revision.
-- All run artifacts are saved to `output/runs/run_NNNN.json`.
+- CLI runs are saved to `output/runs/run_NNNN.json`. Web-server tasks are saved to `output/tasks/<task_id>/` with full conversation history.
 - LaTeX output requires `tectonic` or `pdflatex` installed — see the user manual.
 - Trading runs require internet (yfinance) on first fetch; subsequent runs cache via yfinance's own cache.
+- Accepted task artifacts are automatically ingested into the KB — the knowledge base grows without manual `--ingest`.
 
 ## Adding your own knowledge
 

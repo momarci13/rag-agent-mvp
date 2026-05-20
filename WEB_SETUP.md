@@ -45,8 +45,18 @@ Expected: `{"status":"ok","llm":true,"rag_chunks":<n>}`
 | `POST /run-task` | Run a standard agent task |
 | `POST /research-task` | Full staged research pipeline |
 | `POST /ingest` | Ingest a file or directory into the KB |
-| `GET /api/tasks` | List all saved tasks |
+| `GET /kan-demo` | Run the built-in KAN demo |
+| `GET /api/tasks` | List all saved tasks (paginated) |
+| `GET /api/tasks/{id}` | Get full task: messages, artifacts |
+| `GET /api/tasks/search?q=...` | Keyword search across tasks |
+| `POST /api/tasks/{id}/messages` | Send follow-up message to a task |
+| `POST /api/tasks/{id}/branch` | Branch a task from a given iteration |
+| `POST /api/tasks/{id}/artifacts/{aid}/re-run` | Re-execute artifact with edited code |
+| `POST /api/tasks/{id}/template` | Export task as reusable template |
+| `GET /api/reports/{id}/pdf` | Download compiled PDF report |
 | `GET /api/kg/summary` | Knowledge graph summary |
+| `GET /api/literature/registry` | Literature acquisition registry stats |
+| `GET /runs` | List legacy CLI run files |
 
 ## Troubleshooting
 

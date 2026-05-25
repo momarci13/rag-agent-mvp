@@ -1,0 +1,233 @@
+# Domain Concept Hierarchy
+# Maps informal/sloppy terms to canonical forms and related concepts
+# Used by tiered_retrieval.py for fallback expansion when primary queries fail
+
+finance:
+  risk_metrics:
+    volatility:
+      canonical: "volatility"
+      synonyms: [vol, variance, std_dev, standard_deviation, dispersion, fluctuation, downside_risk]
+      related: [sharpe_ratio, sortino_ratio, maximum_drawdown, beta, var]
+
+    sharpe_ratio:
+      canonical: "Sharpe ratio"
+      synonyms: [sharpe, risk_adjusted_return, returns_per_unit_risk, risk_adjusted_performance]
+      related: [sortino_ratio, calmar_ratio, information_ratio, treynor_ratio]
+
+    drawdown:
+      canonical: "drawdown"
+      synonyms: [max_drawdown, maximum_drawdown, mdd, peak_to_trough, decline]
+      related: [volatility, underwater_plot, recovery_time]
+
+    beta:
+      canonical: "beta"
+      synonyms: [market_beta, systematic_risk, market_sensitivity, correlation_to_market]
+      related: [alpha, capm, risk_free_rate, market_premium]
+
+  trading_concepts:
+    momentum:
+      canonical: "momentum"
+      synonyms: [trend_following, momentum_strategy, trend_strength, price_momentum, trend, runup]
+      related: [mean_reversion, carry, reversal, autocorrelation]
+
+    mean_reversion:
+      canonical: "mean reversion"
+      synonyms: [mean_reverting, reversion_to_mean, statistical_arbitrage, pairs_trading, cointegration]
+      related: [momentum, volatility, correlation, spread_trading]
+
+    carry:
+      canonical: "carry trade"
+      synonyms: [carry, yield_harvest, interest_rate_differential, roll_yield, basis]
+      related: [momentum, value, term_structure]
+
+    value:
+      canonical: "value investing"
+      synonyms: [value, value_factor, mean_reversion_value, fundamental_value, undervaluation]
+      related: [growth, quality, dividend_yield, price_to_book]
+
+  market_structures:
+    volatility_smile:
+      canonical: "volatility smile"
+      synonyms: [smile, volatility_curve, vol_surface, term_structure_volatility]
+      related: [implied_volatility, skew, kurtosis, option_pricing]
+
+    term_structure:
+      canonical: "term structure"
+      synonyms: [yield_curve, forward_curve, contango, backwardation, futures_curve]
+      related: [basis, roll_yield, carry]
+
+    correlation:
+      canonical: "correlation"
+      synonyms: [covariance, correlation_coefficient, rho, dependence, co_movement]
+      related: [diversification, hedge_ratio, portfolio_optimization]
+
+  assets:
+    equity:
+      canonical: "equity"
+      synonyms: [stock, equity_market, equities, share, common_stock]
+      related: [indices, sectors, dividend, earnings]
+
+    fixed_income:
+      canonical: "fixed income"
+      synonyms: [bonds, bond_market, debt, credit, treasury]
+      related: [yield_curve, credit_spread, duration, convexity]
+
+    crypto:
+      canonical: "cryptocurrency"
+      synonyms: [crypto, digital_currency, blockchain, bitcoin, ethereum, altcoin, defi, nft]
+      related: [blockchain, smart_contracts, distributed_ledger]
+
+    commodities:
+      canonical: "commodities"
+      synonyms: [commodity, commodity_market, raw_materials, futures, energy, metals, agriculture]
+      related: [term_structure, storage_costs, seasonality]
+
+    derivatives:
+      canonical: "derivatives"
+      synonyms: [options, futures, forwards, swaps, structured_products]
+      related: [implied_volatility, greeks, hedging, leverage]
+
+statistics:
+  distributions:
+    normal:
+      canonical: "normal distribution"
+      synonyms: [gaussian, normal, bell_curve, standard_distribution]
+      related: [t_distribution, chi_square, fat_tails, skew, kurtosis]
+
+    fat_tails:
+      canonical: "fat tails"
+      synonyms: [heavy_tails, tail_risk, extreme_events, outliers, leptokurtic]
+      related: [kurtosis, skewness, value_at_risk, expected_shortfall]
+
+  hypothesis_testing:
+    hypothesis_test:
+      canonical: "hypothesis testing"
+      synonyms: [statistical_test, significance_test, p_value, t_test, z_test]
+      related: [confidence_interval, type_i_error, type_ii_error, power]
+
+    regression:
+      canonical: "regression"
+      synonyms: [linear_regression, ols, ordinary_least_squares, curve_fitting, predictive_model]
+      related: [r_squared, residuals, heteroskedasticity, multicollinearity]
+
+    correlation:
+      canonical: "correlation"
+      synonyms: [correlation_coefficient, pearson_correlation, spearman_correlation, dependence]
+      related: [covariance, autocorrelation, partial_correlation]
+
+data_engineering:
+  data_types:
+    time_series:
+      canonical: "time series"
+      synonyms: [timeseries, temporal_data, sequential_data, historical_data, intraday, daily, weekly]
+      related: [stationarity, autocorrelation, arima, exponential_smoothing]
+
+    high_frequency:
+      canonical: "high frequency"
+      synonyms: [hft, tick_data, microsecond, intraday, real_time_data, streaming]
+      related: [latency, throughput, market_impact, microstructure]
+
+    panel:
+      canonical: "panel data"
+      synonyms: [panel, cross_section, longitudinal, balanced_panel, unbalanced_panel]
+      related: [fixed_effects, random_effects, within_estimator]
+
+  transformations:
+    rolling_window:
+      canonical: "rolling window"
+      synonyms: [rolling, moving_average, sliding_window, window_function, lookback]
+      related: [lag, shift, cumulative]
+
+    standardization:
+      canonical: "standardization"
+      synonyms: [normalization, z_score, standardize, scaling, unit_variance]
+      related: [mean_centering, log_transform, winsorization]
+
+machine_learning:
+  model_types:
+    neural_network:
+      canonical: "neural network"
+      synonyms: [neural_net, nn, deep_learning, mlp, lstm, transformer, attention]
+      related: [backpropagation, gradient_descent, loss_function, activation]
+
+    tree_based:
+      canonical: "tree-based model"
+      synonyms: [decision_tree, random_forest, xgboost, gradient_boosting, gbm, catboost]
+      related: [feature_importance, splitting_criterion, leaf_node]
+
+    ensemble:
+      canonical: "ensemble method"
+      synonyms: [ensemble, bagging, boosting, stacking, voting, blending]
+      related: [weak_learner, bias_variance, out_of_bag]
+
+  training:
+    overfitting:
+      canonical: "overfitting"
+      synonyms: [overfit, memorization, high_variance, model_complexity]
+      related: [regularization, cross_validation, dropout, early_stopping]
+
+    validation:
+      canonical: "cross validation"
+      synonyms: [cross_validation, cv, k_fold, walk_forward_validation, backtesting]
+      related: [train_test_split, hyperparameter_tuning, grid_search]
+
+writing:
+  document_types:
+    paper:
+      canonical: "research paper"
+      synonyms: [paper, research, academic, publication, preprint, journal, conference]
+      related: [abstract, introduction, literature_review, methodology, results, conclusion]
+
+    report:
+      canonical: "report"
+      synonyms: [report, analysis, findings, white_paper, technical_documentation]
+      related: [executive_summary, appendix, references, tables, figures]
+
+  methodologies:
+    literature_review:
+      canonical: "literature review"
+      synonyms: [literature_review, survey, systematic_review, meta_analysis, systematic_literature_review]
+      related: [abstract, methodology, synthesis, research_gap]
+
+    case_study:
+      canonical: "case study"
+      synonyms: [case_study, case_analysis, empirical_analysis, application, real_world_example]
+      related: [background, methodology, findings, implications]
+
+general:
+  analysis:
+    comparison:
+      canonical: "comparative analysis"
+      synonyms: [comparison, comparative, vs, versus, relative, difference]
+      related: [benchmark, baseline, counterfactual]
+
+    explanation:
+      canonical: "explanation"
+      synonyms: [explain, why, mechanism, how, interpretation, causality]
+      related: [interpretation, intuition, narrative, mechanism]
+
+    optimization:
+      canonical: "optimization"
+      synonyms: [optimize, optimization, tuning, best, efficient, maximize]
+      related: [constraint, objective, parameter, sensitivity]
+
+  methodologies:
+    monte_carlo:
+      canonical: "Monte Carlo simulation"
+      synonyms: [monte_carlo, monte_carlo_simulation, simulation, mcs, stochastic_simulation]
+      related: [random_sampling, variance_reduction, bootstrap]
+
+    bayesian:
+      canonical: "Bayesian analysis"
+      synonyms: [bayesian, bayes, posterior, prior, belief_updating, probabilistic]
+      related: [likelihood, evidence, inference, markov_chain_monte_carlo]
+
+common_aliases:
+  # For very common misspellings or super informal terms
+  risk: [volatility, uncertainty, downside_risk]
+  returns: [performance, profitability, pnl, profit]
+  data: [dataset, timeseries, historical_data, information]
+  model: [strategy, algorithm, system, approach]
+  prediction: [forecast, projection, estimate, prediction]
+  trend: [momentum, direction, pattern, movement]
+  pattern: [signal, anomaly, behavior, regime]

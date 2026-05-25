@@ -75,7 +75,7 @@ trading:
   kelly_fraction: 0.33      # fractional Kelly (haircut on f*)
 
 writing:
-  latex_engine: "tectonic"  # or "pdflatex"; tectonic is a single binary
+  latex_engine: "pdflatex"  # or "pdflatex"; tectonic is a single binary
   citation_sim_threshold: 0.55  # min cosine sim to support a cited claim
 
 research:

@@ -149,7 +149,7 @@ python run.py --ingest data/papers/
 python run.py "analyze bitcoin momentum and volatility correlation"
 
 # Research pipeline with literature discovery
-python run.py --research "Low-volatility anomaly in equity markets" --papers 8
+python run.py --research "Low-volatility anomaly in equity markets" --n-papers 8
 
 # Autonomous research loop
 python run.py --auto-research "GARCH volatility clustering" --iterations 3

@@ -1,6 +1,6 @@
 """LaTeX build + citation validator.
 
-Citation validation is important because 7B models *will* invent BibTeX
+Citation validation is important because language models can invent BibTeX
 keys. We scrub any \\cite{key} whose key isn't in refs.bib.
 """
 from __future__ import annotations

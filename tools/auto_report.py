@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agents.llm import OllamaLLM
+    from agents.llm import HostedLLM
     from agents.graph import RunState
     from tools.source_search import SourceResult
 
@@ -64,7 +64,7 @@ def _extract_narrative_fields(state: "RunState") -> dict[str, Any]:
 def generate_research_report(
     state: "RunState",
     papers: list,
-    llm: "OllamaLLM",
+    llm: "HostedLLM",
 ) -> ResearchReport:
     """Generate a ResearchReport from the completed RunState.
 

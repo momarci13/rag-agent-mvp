@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Finance Assistant.ai</title>
+  <title>Quant Research + IBKR RAG Agents</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-dark.min.css" id="prism-theme">
@@ -15,7 +15,7 @@
   <!-- Sidebar -->
   <aside id="sidebar" class="sidebar">
     <div class="sidebar-header">
-      <h2>Finance Assistant.ai</h2>
+      <h2>Quant Research Agents</h2>
       <button id="sidebarToggle" class="sidebar-toggle">☰</button>
     </div>
 
@@ -27,6 +27,10 @@
       <a href="#tasks" class="nav-item" data-section="tasks">
         <span class="nav-icon">💬</span>
         <span class="nav-text">Chat</span>
+      </a>
+      <a href="#quant" class="nav-item" data-section="quant">
+        <span class="nav-icon">🧠</span>
+        <span class="nav-text">Quant Team</span>
       </a>
       <a href="#reports" class="nav-item" data-section="reports">
         <span class="nav-icon">📄</span>
@@ -155,6 +159,60 @@
         </div>
       </section>
 
+      <!-- Quant Team Section -->
+      <section id="quant-section" class="section">
+        <div class="section-header">
+          <h2>Quant Research + IBKR Agent Team</h2>
+          <p>RAG evidence → hosted free-model research → model/backtest → risk gates → paper-order approval</p>
+        </div>
+
+        <div class="quant-run-card">
+          <label for="quantTask">Research objective</label>
+          <textarea id="quantTask" rows="4" placeholder="Research a conservative SPY momentum strategy with walk-forward validation"></textarea>
+
+          <div class="quant-auth-row">
+            <div>
+              <label for="traderApiToken">Trading API token</label>
+              <input id="traderApiToken" type="password" autocomplete="off" placeholder="TRADER_API_TOKEN" />
+              <small>Used for this request only; it is not saved by the browser.</small>
+            </div>
+            <button id="runQuantBtn" class="btn-primary">Run agent team</button>
+          </div>
+          <div id="quantRunStatus" class="quant-status">Ready. Running the team never submits an order.</div>
+        </div>
+
+        <div id="quantResult" class="quant-result" hidden>
+          <div class="quant-result-header">
+            <div>
+              <span class="quant-label">Run</span>
+              <strong id="quantRunId"></strong>
+            </div>
+            <span id="quantDecisionBadge" class="quant-badge"></span>
+          </div>
+
+          <div class="quant-grid">
+            <article class="quant-panel">
+              <h3>Agent trace</h3>
+              <div id="quantTrace" class="agent-trace"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Grounded research</h3>
+              <div id="quantResearch"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Strategy + backtest</h3>
+              <div id="quantStrategy"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Risk + IBKR preview</h3>
+              <div id="quantRisk"></div>
+              <button id="executeQuantBtn" class="btn-danger" hidden>Approve exact paper order</button>
+              <div id="quantExecutionStatus" class="quant-execution-status"></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <!-- Reports Section -->
       <section id="reports-section" class="section">
         <div class="section-header">
@@ -275,6 +333,7 @@
 
           <div class="settings-group">
             <h3>System</h3>
+            <p class="setting-note">Inference is hosted by OpenRouter. The default chat and embedding routes are free.</p>
             <div class="setting-item">
               <button id="healthCheckBtn" class="btn-secondary">Run Health Check</button>
               <div id="healthStatus" class="health-status">Click to check system health</div>

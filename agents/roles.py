@@ -1,9 +1,4 @@
-"""Role-based agent dispatch.
-
-Each "agent" is just the same LLM with a different system prompt + schema.
-This is intentional — swapping models costs 20-60s of disk->VRAM load
-on consumer hardware.
-"""
+"""Role-based agent dispatch through hosted model routes."""
 from __future__ import annotations
 
 import json
@@ -11,7 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .llm import OllamaLLM
+from .llm import HostedLLM
 from .schemas import (
     AnalysisPlan,
     Critique,
@@ -26,7 +21,7 @@ from .schemas import (
 
 SYSTEM_PROMPTS: dict[str, str] = {
     # ----------------------- PLANNER -----------------------
-    "PLAN": """You are a research orchestrator for a local multi-agent system.
+    "PLAN": """You are a research orchestrator for a hosted multi-agent system.
 Given a user task, classify it and break it into concrete subtasks.
 
 Valid task_type values:
@@ -141,6 +136,8 @@ indexed by date, returns a pandas Series of positions in [-1, 1].
 
 Do NOT put complex code, assignments, or multi-line code in signal_code.
 Keep it simple, e.g., "1.0" for long-only, or "(df['close'] > df['close'].rolling(50).mean()).astype(float)".
+Only `df`, a small allowlist of pandas rolling/series methods, and bounded
+NumPy functions such as `np.where`, `np.log`, and `np.sqrt` are available.
 
 Respond ONLY with JSON matching the StrategySpec schema.""",
 
@@ -308,13 +305,13 @@ def build_messages(
 # ---------------------- typed helpers ----------------------
 
 
-def plan(llm: OllamaLLM, task: str) -> Plan:
+def plan(llm: HostedLLM, task: str) -> Plan:
     msgs = build_messages("PLAN", task)
-    raw = llm.chat_json(msgs, schema_hint=json.dumps(Plan.model_json_schema()))
+    raw = llm.chat_json(msgs, schema_hint=json.dumps(Plan.model_json_schema()), role="planner")
     return Plan.model_validate(raw)
 
 
-def analyze(llm: OllamaLLM, task: str, docs: list[dict], *, feedback: str | None = None, decoding: Any = None) -> str:
+def analyze(llm: HostedLLM, task: str, docs: list[dict], *, feedback: str | None = None, decoding: Any = None) -> str:
     """DS agent returns pipeline execution code as a markdown fenced block."""
     extra_sys = ""
     if decoding:
@@ -323,14 +320,14 @@ def analyze(llm: OllamaLLM, task: str, docs: list[dict], *, feedback: str | None
         extra_sys += f"\n\nFeedback: {feedback}"
 
     msgs = build_messages("DS", task, context_docs=docs, extra_system=extra_sys)
-    response = llm.chat(msgs, temperature=0.2)
+    response = llm.chat(msgs, temperature=0.2, role="model")
     # Map citations in the response
     return map_citations_to_response(response, docs)
 
 
-def design_strategy(llm: OllamaLLM, task: str, docs: list[dict]) -> StrategySpec:
+def design_strategy(llm: HostedLLM, task: str, docs: list[dict]) -> StrategySpec:
     msgs = build_messages("QUANT", task, context_docs=docs)
-    raw = llm.chat_json(msgs, schema_hint=json.dumps(StrategySpec.model_json_schema()))
+    raw = llm.chat_json(msgs, schema_hint=json.dumps(StrategySpec.model_json_schema()), role="quant")
     try:
         return StrategySpec.model_validate(raw)
     except ValidationError as e:
@@ -339,18 +336,18 @@ def design_strategy(llm: OllamaLLM, task: str, docs: list[dict]) -> StrategySpec
             {"role": "assistant", "content": json.dumps(raw)},
             {"role": "user", "content": f"Your JSON failed validation: {e}. Fix and resend."},
         ]
-        raw2 = llm.chat_json(retry_msgs, schema_hint=json.dumps(StrategySpec.model_json_schema()))
+        raw2 = llm.chat_json(retry_msgs, schema_hint=json.dumps(StrategySpec.model_json_schema()), role="quant")
         return StrategySpec.model_validate(raw2)
 
 
-def outline_paper(llm: OllamaLLM, task: str, docs: list[dict]) -> Outline:
+def outline_paper(llm: HostedLLM, task: str, docs: list[dict]) -> Outline:
     msgs = build_messages("WRITE", f"Produce an outline for: {task}", context_docs=docs)
-    raw = llm.chat_json(msgs, schema_hint=json.dumps(Outline.model_json_schema()))
+    raw = llm.chat_json(msgs, schema_hint=json.dumps(Outline.model_json_schema()), role="writer")
     return Outline.model_validate(raw)
 
 
 def draft_section(
-    llm: OllamaLLM,
+    llm: HostedLLM,
     section_title: str,
     key_points: list[str],
     docs: list[dict],
@@ -363,12 +360,12 @@ def draft_section(
         f"Key points to cover:\n" + "\n".join(f"- {p}" for p in key_points)
     )
     msgs = build_messages("WRITE", user, context_docs=docs, extra_system=extra)
-    response = llm.chat(msgs, temperature=0.6)
+    response = llm.chat(msgs, temperature=0.6, role="writer")
     return map_citations_to_response(response, docs)
 
 
 def critique(
-    llm: OllamaLLM,
+    llm: HostedLLM,
     artifact: str,
     context: str = "",
     code_run_code: int | None = None,
@@ -378,7 +375,7 @@ def critique(
         "CRITIC",
         f"Evaluate this output:\n---\n{artifact}\n---\n{context}{tail}",
     )
-    raw = llm.chat_json(msgs, schema_hint=json.dumps(Critique.model_json_schema()))
+    raw = llm.chat_json(msgs, schema_hint=json.dumps(Critique.model_json_schema()), role="risk")
     return Critique.model_validate(raw)
 
 
@@ -386,7 +383,7 @@ def critique(
 
 
 def analyze_literature_gaps(
-    llm: OllamaLLM,
+    llm: HostedLLM,
     topic: str,
     docs: list[dict],
     lit_context: str = "",
@@ -399,7 +396,7 @@ def analyze_literature_gaps(
         context_docs=docs,
         extra_system=extra,
     )
-    raw = llm.chat_json(msgs, schema_hint=json.dumps(LiteratureGapAnalysis.model_json_schema()))
+    raw = llm.chat_json(msgs, schema_hint=json.dumps(LiteratureGapAnalysis.model_json_schema()), role="research")
     try:
         return LiteratureGapAnalysis.model_validate(raw)
     except Exception:
@@ -410,7 +407,7 @@ def analyze_literature_gaps(
 
 
 def form_hypotheses(
-    llm: OllamaLLM,
+    llm: HostedLLM,
     topic: str,
     gap_analysis: LiteratureGapAnalysis,
 ) -> HypothesisSet:
@@ -421,7 +418,7 @@ def form_hypotheses(
         f"Suggested experiments:\n" + "\n".join(f"- {e}" for e in gap_analysis.suggested_experiments)
     )
     msgs = build_messages("HYPOTHESIS_FORMER", user_msg)
-    raw = llm.chat_json(msgs, schema_hint=json.dumps(HypothesisSet.model_json_schema()))
+    raw = llm.chat_json(msgs, schema_hint=json.dumps(HypothesisSet.model_json_schema()), role="research")
     try:
         return HypothesisSet.model_validate(raw)
     except Exception:
@@ -432,7 +429,7 @@ def form_hypotheses(
 
 
 def draft_section_with_citation_check(
-    llm: OllamaLLM,
+    llm: HostedLLM,
     section_title: str,
     key_points: list[str],
     docs: list[dict],
@@ -454,7 +451,7 @@ def draft_section_with_citation_check(
 
 
 def generate_narrative(
-    llm: OllamaLLM,
+    llm: HostedLLM,
     task: str,
     subtasks: list[str],
     code: str,
@@ -471,7 +468,7 @@ def generate_narrative(
         f"Execution errors (stderr, first 800 chars):\n{stderr[:800]}"
     )
     msgs = build_messages("NARRATOR", user_msg)
-    raw = llm.chat_json(msgs, schema_hint=json.dumps(TaskNarrative.model_json_schema()))
+    raw = llm.chat_json(msgs, schema_hint=json.dumps(TaskNarrative.model_json_schema()), role="narrator")
     try:
         return TaskNarrative.model_validate(raw)
     except Exception:

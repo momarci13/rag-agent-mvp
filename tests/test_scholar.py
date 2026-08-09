@@ -15,6 +15,7 @@ pytest.importorskip("sentence_transformers")
 pytest.importorskip("rank_bm25")
 
 from rag.hybrid import LiteHybridRAG
+from rag.embeddings import DeterministicHashEmbeddings
 from tools.scholar import scholar_augment_task, ArxivPaper
 
 
@@ -22,7 +23,12 @@ from tools.scholar import scholar_augment_task, ArxivPaper
 def tmp_rag():
     """Temporary RAG instance for testing."""
     d = tempfile.mkdtemp(prefix="scholar_test_")
-    rag = LiteHybridRAG(db_path=d, collection="scholar_test", alpha_dense=0.6)
+    rag = LiteHybridRAG(
+        db_path=d,
+        collection="scholar_test",
+        alpha_dense=0.6,
+        embedding_client=DeterministicHashEmbeddings(),
+    )
     rag.reset()
     yield rag
     shutil.rmtree(d, ignore_errors=True)

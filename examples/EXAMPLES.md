@@ -165,8 +165,7 @@ cat output/tasks/<task_id>/research_report.md
 
 ## Tips
 
-- The first run after `ollama serve` is slow (model load, ~30-60 s). Subsequent
-  runs reuse the loaded model.
+- First-request latency depends on the free model selected by OpenRouter.
 - If a task fails the critic on iteration 1, the agent retries once. Set
   `--max-iter 1` to disable revision.
 - Web-server tasks return `{status: "queued"}` immediately. The browser tracks

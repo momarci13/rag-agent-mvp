@@ -1,6 +1,6 @@
 """Typed schemas for agent I/O.
 
-We force structured outputs because 7B models drift badly in free text.
+Structured outputs create deterministic handoffs between hosted model roles.
 Pydantic validation is the guardrail.
 """
 from __future__ import annotations

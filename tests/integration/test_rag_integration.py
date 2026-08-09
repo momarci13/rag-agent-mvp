@@ -19,6 +19,7 @@ pytest.importorskip("sentence_transformers")
 pytest.importorskip("tiktoken")
 
 from rag.hybrid import LiteHybridRAG
+from rag.embeddings import DeterministicHashEmbeddings
 from rag.ingest import ingest_file
 from rag.metrics import RetrievalMetrics
 
@@ -86,7 +87,11 @@ def mock_llm():
 def test_rag():
     """Create temporary RAG instance with test data."""
     tmpdir = tempfile.mkdtemp(prefix="test_integration_")
-    rag = LiteHybridRAG(db_path=tmpdir, collection="test")
+    rag = LiteHybridRAG(
+        db_path=tmpdir,
+        collection="test",
+        embedding_client=DeterministicHashEmbeddings(),
+    )
 
     # Add test documents
     test_docs = [

@@ -1,7 +1,7 @@
-"""Lite hybrid RAG: dense (bge-small) + BM25, weighted fusion.
+"""Lite hybrid RAG: hosted dense embeddings plus local BM25 fusion.
 
-Deliberately no cross-encoder reranker — it costs another 300 MB VRAM
-we don't have. For <100k chunks, fusion alone is ~95% as good.
+No model inference runs in this process. Chroma persists vectors locally and
+BM25 indexes text; all dense vectors are created by the hosted gateway.
 
 Math:
   s_dense(q,d) = cos(phi(q), phi(d))
@@ -17,8 +17,10 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
+from rag.embeddings import EmbeddingClient, HostedEmbeddings
+
 if TYPE_CHECKING:
-    from agents.llm import OllamaLLM
+    from agents.llm import HostedLLM
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +32,6 @@ try:
 except Exception as e:  # pragma: no cover
     raise ImportError(
         "chromadb is required. Install with: pip install chromadb"
-    ) from e
-
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception as e:  # pragma: no cover
-    raise ImportError(
-        "sentence-transformers is required. Install: pip install sentence-transformers"
     ) from e
 
 try:
@@ -99,14 +94,15 @@ class LiteHybridRAG:
     def __init__(
         self,
         db_path: str = "./kb/chroma",
-        collection: str = "main",
-        embedding_model: str = "BAAI/bge-small-en-v1.5",
+        collection: str = "openrouter-free-v1",
+        embedding_model: str = "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+        embedding_client: EmbeddingClient | None = None,
         alpha_dense: float = 0.6,
         query_expansion_enabled: bool = False,
-        query_expansion_method: str = "local_model",
+        query_expansion_method: str = "llm_then_rules",
         max_expansions: int = 3,
         reranking_enabled: bool = False,
-        reranking_model: str = "local_cross_encoder",
+        reranking_model: str = "none",
         top_k_before_rerank: int = 50,
         top_k_after_rerank: int = 6,
     ):
@@ -130,7 +126,7 @@ class LiteHybridRAG:
         )
         self.col = self.client.get_or_create_collection(collection)
 
-        self.emb = SentenceTransformer(embedding_model)
+        self.emb = embedding_client or HostedEmbeddings(embedding_model)
 
         # Load reranking model if enabled
         self.reranker = None
@@ -154,8 +150,7 @@ class LiteHybridRAG:
         """Load the reranking model."""
         try:
             if self.reranking_model == "local_cross_encoder":
-                from sentence_transformers import CrossEncoder
-                self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+                raise ValueError("Local rerankers are disabled; use hosted inference")
             # TODO: Add Cohere API support
             elif self.reranking_model.startswith("cohere"):
                 # Placeholder for Cohere integration
@@ -167,7 +162,7 @@ class LiteHybridRAG:
             logger.warning("Failed to load reranker: %s", e)
             self.reranker = None
 
-    def _expand_query(self, query: str, llm: "OllamaLLM | None" = None) -> list[str]:
+    def _expand_query(self, query: str, llm: "HostedLLM | None" = None) -> list[str]:
         """Expand the query with related terms, optionally via LLM."""
         if not self.query_expansion_enabled:
             return [query]
@@ -403,7 +398,7 @@ class LiteHybridRAG:
         m: int = 30,
         token_budget: int = 3500,
         metadata_filters: dict | None = None,
-        llm: "OllamaLLM | None" = None,
+        llm: "HostedLLM | None" = None,
     ) -> list[dict]:
         """Retrieve top-k documents using hybrid dense+BM25 retrieval with optional query expansion and reranking.
         

@@ -55,11 +55,16 @@ print("TEST 3: Metadata Filtering")
 print("="*60)
 try:
     from rag.hybrid import LiteHybridRAG
+    from rag.embeddings import DeterministicHashEmbeddings
     
     # Create temporary RAG instance
     tmpdir = tempfile.mkdtemp(prefix="test_phase1_")
     try:
-        rag = LiteHybridRAG(db_path=tmpdir, collection="test")
+        rag = LiteHybridRAG(
+            db_path=tmpdir,
+            collection="test",
+            embedding_client=DeterministicHashEmbeddings(),
+        )
         
         # Add test documents with metadata
         docs = [

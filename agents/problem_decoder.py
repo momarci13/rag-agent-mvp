@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
-from .llm import OllamaLLM
+from .llm import HostedLLM
 from .roles import build_messages
 
 
@@ -39,7 +39,7 @@ class ProblemDecoding(BaseModel):
     confidence: float = Field(description="Confidence score in the decoding (0-1)")
 
 
-def decode_problem(llm: OllamaLLM, task: str, rag_context: Optional[List[Dict]] = None) -> ProblemDecoding:
+def decode_problem(llm: HostedLLM, task: str, rag_context: Optional[List[Dict]] = None) -> ProblemDecoding:
     """Decode user problem into structured requirements using LLM + RAG.
 
     Args:

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rag.hybrid import LiteHybridRAG
-    from agents.llm import OllamaLLM
+    from agents.llm import HostedLLM
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def expand_kb_on_weak_retrieval(
     query: str,
     docs: list[dict],
     rag: "LiteHybridRAG",
-    llm: "OllamaLLM",
+    llm: "HostedLLM",
     task_id: str,
     n_papers: int = 5,
     threshold: float = RETRIEVAL_QUALITY_THRESHOLD,

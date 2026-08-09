@@ -5,11 +5,10 @@ bars on <100 tickers. Execution occurs on next-bar open (no lookahead).
 """
 from __future__ import annotations
 
-import math
+import ast
 from dataclasses import dataclass
 from typing import Callable
 
-import numpy as np
 import pandas as pd
 
 from .risk import (
@@ -142,6 +141,103 @@ def run_portfolio_backtest(
 
 # ---------------- signal compilation ----------------
 
+_SIGNAL_NAMES = {"df", "np", "abs", "min", "max", "len", "float", "int"}
+_SIGNAL_CALL_NAMES = {"abs", "min", "max", "len", "float", "int"}
+_SIGNAL_METHODS = {
+    "abs",
+    "astype",
+    "between",
+    "clip",
+    "diff",
+    "ewm",
+    "expanding",
+    "fillna",
+    "max",
+    "mean",
+    "median",
+    "min",
+    "pct_change",
+    "quantile",
+    "rank",
+    "rolling",
+    "shift",
+    "std",
+    "sum",
+    "var",
+    "where",
+}
+_NUMPY_FUNCTIONS = {
+    "abs",
+    "clip",
+    "exp",
+    "isfinite",
+    "isnan",
+    "log",
+    "log1p",
+    "maximum",
+    "minimum",
+    "sign",
+    "sqrt",
+    "tanh",
+    "where",
+}
+
+
+def _validate_signal_expression(signal_code: str) -> ast.Expression:
+    if not signal_code.strip() or len(signal_code) > 4_000:
+        raise ValueError("signal_code must be a non-empty expression under 4,000 characters")
+    try:
+        tree = ast.parse(signal_code, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"signal_code is not a valid expression: {exc.msg}") from exc
+    nodes = list(ast.walk(tree))
+    if len(nodes) > 200:
+        raise ValueError("signal_code is too complex")
+
+    structural_nodes = (
+        ast.Expression,
+        ast.Constant,
+        ast.Name,
+        ast.Load,
+        ast.Subscript,
+        ast.Slice,
+        ast.List,
+        ast.Tuple,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.BoolOp,
+        ast.Compare,
+        ast.IfExp,
+        ast.Call,
+        ast.Attribute,
+        ast.keyword,
+        ast.operator,
+        ast.unaryop,
+        ast.boolop,
+        ast.cmpop,
+        ast.expr_context,
+    )
+    for node in nodes:
+        if not isinstance(node, structural_nodes):
+            raise ValueError(f"signal_code syntax {type(node).__name__} is not allowed")
+        if isinstance(node, ast.Name) and node.id not in _SIGNAL_NAMES:
+            raise ValueError(f"signal_code name {node.id!r} is not allowed")
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("_"):
+                raise ValueError("private and dunder attributes are not allowed")
+            if isinstance(node.value, ast.Name) and node.value.id == "np":
+                if node.attr not in _NUMPY_FUNCTIONS:
+                    raise ValueError(f"NumPy attribute {node.attr!r} is not allowed")
+            elif node.attr not in _SIGNAL_METHODS:
+                raise ValueError(f"signal method {node.attr!r} is not allowed")
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id not in _SIGNAL_CALL_NAMES:
+                    raise ValueError(f"signal function {node.func.id!r} is not allowed")
+            elif not isinstance(node.func, ast.Attribute):
+                raise ValueError("indirect signal function calls are not allowed")
+    return tree
+
 def compile_signal(signal_code: str) -> Callable[[pd.DataFrame], pd.Series]:
     """Compile a StrategySpec.signal_code string into a callable.
 
@@ -151,10 +247,12 @@ def compile_signal(signal_code: str) -> Callable[[pd.DataFrame], pd.Series]:
     Example: "(df['close'] > df['close'].rolling(50).mean()).astype(float) - 0.5"
     """
     import numpy as _np
+
+    tree = _validate_signal_expression(signal_code)
+    compiled = compile(tree, "<strategy-signal>", "eval")
     safe_globals = {
         "__builtins__": {},
         "np": _np,
-        "pd": pd,
         "abs": abs,
         "min": min,
         "max": max,
@@ -165,7 +263,7 @@ def compile_signal(signal_code: str) -> Callable[[pd.DataFrame], pd.Series]:
 
     def _fn(df: pd.DataFrame) -> pd.Series:
         locs = {"df": df}
-        sig = eval(signal_code, safe_globals, locs)  # noqa: S307
+        sig = eval(compiled, safe_globals, locs)  # noqa: S307 - validated expression DSL
         if isinstance(sig, (int, float)):
             sig = pd.Series(float(sig), index=df.index)
         elif not isinstance(sig, pd.Series):

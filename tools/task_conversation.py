@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from agents.graph import RunState, Message
-from agents.llm import OllamaLLM
+from agents.llm import HostedLLM
 from agents.problem_decoder import decode_problem
 from rag.hybrid import LiteHybridRAG
 from tools.sandbox import run_code_sync
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 def process_user_message(
     task_id: str,
     message_content: str,
-    llm: OllamaLLM,
+    llm: HostedLLM,
     rag: LiteHybridRAG,
     iteration: int = 0,
 ) -> tuple[str, list[dict], list[dict]]:
@@ -225,7 +225,7 @@ def branch_task(
     return new_task_id
 
 
-def _classify_message(content: str, llm: OllamaLLM | None = None) -> str:
+def _classify_message(content: str, llm: HostedLLM | None = None) -> str:
     """Classify user message type.
 
     Returns: "question" | "refinement" | "new_iteration"
@@ -285,7 +285,7 @@ def _handle_question(
     task: RunState,
     message: str,
     docs: list[dict],
-    llm: OllamaLLM,
+    llm: HostedLLM,
 ) -> tuple[str, list[dict], list[dict]]:
     """Handle a clarification/information question. Returns (response_text, [], [])."""
     from agents import roles
@@ -306,7 +306,7 @@ def _handle_refinement(
     task_id: str,
     message: str,
     docs: list[dict],
-    llm: OllamaLLM,
+    llm: HostedLLM,
     rag: LiteHybridRAG,
 ) -> tuple[str, list[dict], list[dict]]:
     """Handle a refinement request — regenerates the artifact with user feedback.
@@ -373,7 +373,7 @@ def _handle_new_iteration(
     task_id: str,
     message: str,
     docs: list[dict],
-    llm: OllamaLLM,
+    llm: HostedLLM,
     rag: LiteHybridRAG,
 ) -> tuple[str, list[dict], list[dict]]:
     """Handle request to start a new iteration — runs multi-source search then re-executes.

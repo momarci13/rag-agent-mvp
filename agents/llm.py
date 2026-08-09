@@ -1,13 +1,14 @@
-"""Ollama client with JSON-mode + retry.
+"""Provider-neutral hosted LLM client using an OpenAI-compatible API.
 
-One model, many roles: we switch behaviour via system prompts rather than
-loading different models — a 7B Q4 fits in VRAM; two don't.
+The default endpoint is OpenRouter's fully hosted free-model router. The
+application never loads or runs a local language model. Agent specialisation
+is expressed through role prompts and optional per-role hosted model routes.
 """
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -15,177 +16,259 @@ import httpx
 
 
 class ModelSelectionStrategy(Enum):
+    """How configured hosted model routes are ordered."""
+
+    PRIORITY = "priority"
     COMPLEXITY_BASED = "complexity_based"
-    RESOURCE_BASED = "resource_based"
     USER_SPECIFIED = "user_specified"
 
 
-@dataclass
+@dataclass(frozen=True)
 class ModelSpec:
+    """A model route exposed by the configured hosted provider."""
+
     name: str
     priority: int = 1
-    min_vram_gb: int = 4
-    capabilities: list[str] | None = None  # e.g., ["math", "reasoning"]
+    capabilities: list[str] | None = None
 
 
 @dataclass
 class LLMConfig:
-    model: str  # Backward compatibility: primary model
-    host: str = "http://localhost:11434"
-    num_ctx: int = 8192
+    """Configuration for :class:`HostedLLM`."""
+
+    model: str = "openrouter/free"
+    base_url: str = "https://openrouter.ai/api/v1"
+    api_key: str = ""
+    provider_name: str = "OpenRouter"
+    require_api_key: bool = True
+    health_path: str = "/key"
     temperature: float = 0.2
     timeout_s: int = 180
-    # New fields for multi-model support
+    max_output_tokens: int = 8192
     models: list[ModelSpec] | None = None
-    selection_strategy: ModelSelectionStrategy = ModelSelectionStrategy.COMPLEXITY_BASED
-    fallback_timeout_s: int = 60
+    selection_strategy: ModelSelectionStrategy = ModelSelectionStrategy.PRIORITY
+    fallback_timeout_s: int = 90
+    role_models: dict[str, str] = field(default_factory=dict)
+    extra_headers: dict[str, str] = field(default_factory=dict)
 
 
-class OllamaLLM:
-    """Minimal Ollama client. Uses the /api/chat endpoint directly so we
-    don't need the `ollama` package at runtime (though it's in requirements
-    for convenience)."""
+class HostedLLM:
+    """Small, synchronous OpenAI-compatible hosted-inference client.
 
-    def __init__(self, cfg: LLMConfig):
+    The class intentionally exposes the same ``chat`` and ``chat_json`` shape
+    used by the agents, keeping every role independent of a provider SDK.
+    """
+
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self.cfg = cfg
-        self._client = httpx.Client(timeout=cfg.timeout_s)
-        # If no models list, create from single model for backward compatibility
+        self.base_url = cfg.base_url.rstrip("/")
+        self._client = httpx.Client(timeout=cfg.timeout_s, transport=transport)
         if not cfg.models:
-            self.cfg.models = [ModelSpec(name=cfg.model, priority=1, min_vram_gb=4)]
+            cfg.models = [ModelSpec(name=cfg.model, priority=1)]
 
-    def _get_available_vram_gb(self) -> int:
-        """Estimate available VRAM. Simple heuristic: assume 8GB for now."""
-        # TODO: Implement proper VRAM detection using GPUtil or nvidia-ml-py
-        return 8  # Placeholder
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> "HostedLLM":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json", **self.cfg.extra_headers}
+        if self.cfg.api_key:
+            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
+        return headers
 
     def select_models(self, task_complexity: str = "medium") -> list[ModelSpec]:
-        """Select primary and fallback models based on strategy."""
-        available_vram = self._get_available_vram_gb()
-        candidates = [m for m in self.cfg.models if m.min_vram_gb <= available_vram]
-        if not candidates:
-            # Fallback to any model if none fit
-            candidates = self.cfg.models
+        """Return the ordered hosted-model fallback chain.
 
-        # Sort by priority (lower number = higher priority)
-        candidates.sort(key=lambda m: m.priority)
+        Priority is deterministic.  For ``complexity_based`` routing, simple
+        tasks prefer routes tagged ``fast`` and complex tasks prefer routes
+        tagged ``reasoning``; configured priority resolves remaining ties.
+        """
 
-        if self.cfg.selection_strategy == ModelSelectionStrategy.COMPLEXITY_BASED:
-            # For complex tasks, prefer larger models; simple tasks, smaller
-            if task_complexity == "complex":
-                return candidates  # Try best first
-            else:
-                return list(reversed(candidates))  # Try smaller first
-        elif self.cfg.selection_strategy == ModelSelectionStrategy.RESOURCE_BASED:
-            return candidates  # Already sorted by priority assuming larger = higher priority
-        else:  # USER_SPECIFIED or default
+        candidates = list(self.cfg.models or [])
+        candidates.sort(key=lambda item: item.priority)
+        if self.cfg.selection_strategy != ModelSelectionStrategy.COMPLEXITY_BASED:
             return candidates
+
+        preferred = "reasoning" if task_complexity == "complex" else "fast"
+        return sorted(
+            candidates,
+            key=lambda item: (
+                preferred not in (item.capabilities or []),
+                item.priority,
+            ),
+        )
+
+    def _model_for_role(self, role: str | None) -> str | None:
+        if role is None:
+            return None
+        return self.cfg.role_models.get(role.lower())
 
     def chat_with_fallback(
         self,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         task_complexity: str = "medium",
         *,
         temperature: float | None = None,
         json_mode: bool = False,
         stop: list[str] | None = None,
+        role: str | None = None,
     ) -> str:
-        """Chat with automatic fallback to alternative models on failure."""
-        model_chain = self.select_models(task_complexity)
-        last_error = None
+        """Call the preferred route and fail over through configured routes."""
 
-        for i, model_spec in enumerate(model_chain):
-            original_model = self.cfg.model
+        role_model = self._model_for_role(role)
+        chain = [ModelSpec(role_model, priority=0)] if role_model else []
+        chain.extend(m for m in self.select_models(task_complexity) if m.name != role_model)
+        last_error: Exception | None = None
+
+        for index, model_spec in enumerate(chain):
             try:
-                self.cfg.model = model_spec.name
-                # First attempt uses full timeout; fallbacks use shorter timeout
-                self._client.timeout = self.cfg.timeout_s if i == 0 else self.cfg.fallback_timeout_s
+                timeout = self.cfg.timeout_s if index == 0 else self.cfg.fallback_timeout_s
+                return self.chat(
+                    messages,
+                    temperature=temperature,
+                    json_mode=json_mode,
+                    stop=stop,
+                    model=model_spec.name,
+                    timeout_s=timeout,
+                )
+            except (httpx.HTTPError, KeyError, ValueError) as exc:
+                last_error = exc
 
-                result = self.chat(messages, temperature=temperature, json_mode=json_mode, stop=stop)
-                return result
-            except Exception as e:
-                last_error = e
-                print(f"Model {model_spec.name} failed: {e}. Trying next...")
-                continue
-            finally:
-                self.cfg.model = original_model
-                self._client.timeout = self.cfg.timeout_s
-
-        raise RuntimeError(f"All models failed. Last error: {last_error}")
+        raise RuntimeError(
+            f"All {self.cfg.provider_name} model routes failed. Last error: {last_error}"
+        )
 
     def chat(
         self,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         *,
         temperature: float | None = None,
         json_mode: bool = False,
         stop: list[str] | None = None,
+        model: str | None = None,
+        role: str | None = None,
+        timeout_s: int | None = None,
     ) -> str:
+        """Send one non-streaming hosted chat-completions request."""
+
+        selected_model = model or self._model_for_role(role) or self.cfg.model
         payload: dict[str, Any] = {
-            "model": self.cfg.model,
+            "model": selected_model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": self.cfg.temperature if temperature is None else temperature,
-                "num_ctx": self.cfg.num_ctx,
-            },
+            "temperature": self.cfg.temperature if temperature is None else temperature,
+            "max_tokens": self.cfg.max_output_tokens,
         }
         if stop:
-            payload["options"]["stop"] = stop
+            payload["stop"] = stop
         if json_mode:
-            payload["format"] = "json"
+            payload["response_format"] = {"type": "json_object"}
 
-        r = self._client.post(f"{self.cfg.host}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-        return data["message"]["content"]
+        response = self._client.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            json=payload,
+            timeout=timeout_s or self.cfg.timeout_s,
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = data["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError(
+                f"{self.cfg.provider_name} response did not contain text content"
+            )
+        return content
 
     def chat_json(
         self,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         schema_hint: str = "",
         *,
         temperature: float = 0.0,
         max_retries: int = 2,
         task_complexity: str | None = None,
-    ) -> dict:
-        """Ask the model for JSON and parse it with retries on malformed output."""
+        role: str | None = None,
+    ) -> dict[str, Any]:
+        """Request and validate a JSON object with bounded retries."""
+
+        request_messages = list(messages)
         if schema_hint:
-            messages = messages + [{
+            request_messages.append({
                 "role": "system",
                 "content": f"Respond with JSON only. Schema hint:\n{schema_hint}",
-            }]
+            })
         if task_complexity is None:
-            # Estimate from the last user message
-            user_msg = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-            task_complexity = self.estimate_task_complexity(user_msg)
+            user_text = next(
+                (str(m.get("content", "")) for m in reversed(request_messages) if m.get("role") == "user"),
+                "",
+            )
+            task_complexity = self.estimate_task_complexity(user_text)
 
-        last_err = None
+        last_error: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
-                txt = self.chat_with_fallback(messages, task_complexity, temperature=temperature, json_mode=True)
-                return json.loads(txt)
-            except (json.JSONDecodeError, httpx.HTTPError) as e:
-                last_err = e
-                time.sleep(0.5 * (attempt + 1))
-        raise RuntimeError(f"Failed to get valid JSON after {max_retries+1} tries: {last_err}")
+                text = self.chat_with_fallback(
+                    request_messages,
+                    task_complexity,
+                    temperature=temperature,
+                    json_mode=True,
+                    role=role,
+                )
+                parsed = json.loads(_strip_json_fence(text))
+                if not isinstance(parsed, dict):
+                    raise ValueError("Expected a JSON object")
+                return parsed
+            except (json.JSONDecodeError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+                last_error = exc
+                time.sleep(0.25 * (attempt + 1))
+        raise RuntimeError(
+            f"Failed to obtain valid JSON from {self.cfg.provider_name} after "
+            f"{max_retries + 1} attempts: {last_error}"
+        )
 
     def health(self) -> bool:
-        """Return True if the Ollama service is reachable."""
+        """Return whether the hosted models endpoint is reachable and authorized."""
+
+        if self.cfg.require_api_key and not self.cfg.api_key:
+            return False
         try:
-            r = self._client.get(f"{self.cfg.host}/api/tags", timeout=5)
-            return r.status_code == 200
-        except Exception:
+            response = self._client.get(
+                f"{self.base_url}/{self.cfg.health_path.lstrip('/')}",
+                headers=self._headers(),
+                timeout=min(8, self.cfg.timeout_s),
+            )
+            return response.status_code == 200
+        except httpx.HTTPError:
             return False
 
-    def estimate_task_complexity(self, task: str) -> str:
-        """Simple heuristic to estimate task complexity."""
+    @staticmethod
+    def estimate_task_complexity(task: str) -> str:
         words = len(task.split())
-        has_complex_keywords = any(kw in task.lower() for kw in [
-            "analyze", "optimize", "model", "predict", "strategy", "research", "complex"
-        ])
-        if words > 50 or has_complex_keywords:
+        complex_terms = {
+            "analyze", "optimize", "model", "predict", "strategy", "research",
+            "portfolio", "regime", "backtest", "causal",
+        }
+        if words > 50 or any(term in task.lower() for term in complex_terms):
             return "complex"
-        elif words < 20:
+        if words < 10:
             return "simple"
-        else:
-            return "medium"
+        return "medium"
+
+
+def _strip_json_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        first_newline = stripped.find("\n")
+        if first_newline >= 0:
+            stripped = stripped[first_newline + 1 : -3].strip()
+    return stripped

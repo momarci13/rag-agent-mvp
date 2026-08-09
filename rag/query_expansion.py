@@ -2,7 +2,7 @@
 
 Provides synonym expansion, related term discovery, and multi-query generation
 to improve retrieval quality beyond single-pass queries.
-Supports LLM-based reformulation when an OllamaLLM instance is available.
+Supports hosted LLM reformulation through the configured provider.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import re
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
-    from agents.llm import OllamaLLM
+    from agents.llm import HostedLLM
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,7 @@ class QueryExpander:
 
 def expand_query_with_llm(
     query: str,
-    llm: "OllamaLLM",
+    llm: "HostedLLM",
     n_variants: int = 3,
 ) -> list[str]:
     """Generate n_variants academically-diverse reformulations via LLM JSON call.

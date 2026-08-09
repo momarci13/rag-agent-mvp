@@ -1,7 +1,6 @@
 """Tests for the RAG hybrid retriever.
 
-These tests don't need Ollama, but they DO download bge-small-en-v1.5
-(~130 MB) on first run. Skipped automatically if model isn't cached.
+These tests use deterministic synthetic vectors and never call a model.
 """
 from __future__ import annotations
 
@@ -12,8 +11,7 @@ import tempfile
 import pytest
 
 pytest.importorskip("chromadb")
-pytest.importorskip("sentence_transformers")
-
+from rag.embeddings import DeterministicHashEmbeddings
 from rag.hybrid import LiteHybridRAG
 from rag.ingest import chunk_text, ingest_path, parse_bibtex
 
@@ -21,7 +19,12 @@ from rag.ingest import chunk_text, ingest_path, parse_bibtex
 @pytest.fixture
 def tmp_rag():
     d = tempfile.mkdtemp(prefix="rag_test_")
-    rag = LiteHybridRAG(db_path=d, collection="tmp", alpha_dense=0.6)
+    rag = LiteHybridRAG(
+        db_path=d,
+        collection="tmp",
+        alpha_dense=0.6,
+        embedding_client=DeterministicHashEmbeddings(),
+    )
     rag.reset()
     yield rag
     shutil.rmtree(d, ignore_errors=True)
@@ -75,7 +78,7 @@ def test_retrieval_finds_relevant_doc(tmp_rag):
     tmp_rag.add(docs)
     assert len(tmp_rag) == 4
 
-    res = tmp_rag.retrieve("how do I evaluate a trading strategy", k=2)
+    res = tmp_rag.retrieve("Sharpe portfolio return variance", k=2)
     ids = [r["id"] for r in res]
     # At least one finance doc should appear in top 2
     assert any(i.startswith("fin") for i in ids)

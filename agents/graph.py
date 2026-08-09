@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from rag.hybrid import LiteHybridRAG
 
-from .llm import OllamaLLM
+from .llm import HostedLLM
 from . import roles
 from .problem_decoder import decode_problem, validate_requirements
 from tools import scholar
@@ -70,7 +70,7 @@ def _build_feedback(state: "RunState") -> str | None:
 
 def run(
     task: str,
-    llm: OllamaLLM,
+    llm: HostedLLM,
     rag: LiteHybridRAG,
     *,
     max_iter: int = 2,
@@ -260,7 +260,7 @@ def run(
 
 def research_run(
     task: str,
-    llm: OllamaLLM,
+    llm: HostedLLM,
     rag: LiteHybridRAG,
     *,
     max_iter: int = 2,
@@ -778,7 +778,7 @@ def _generate_report_tex(
 def _attach_narrative_report(
     artifact: dict,
     state: "RunState",
-    llm: OllamaLLM,
+    llm: HostedLLM,
     tools: dict,
 ) -> None:
     """Generate narrative + LaTeX PDF and attach to artifact in-place."""

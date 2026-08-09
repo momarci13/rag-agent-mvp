@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from agents.llm import OllamaLLM
+    from agents.llm import HostedLLM
     from rag.hybrid import LiteHybridRAG
     from tools.citation_dag import CitationDAG
     from tools.auto_report import ResearchReport
@@ -46,7 +46,7 @@ class AutonomousResearchResult:
 def detect_knowledge_gaps(
     query: str,
     docs: list[dict],
-    llm: "OllamaLLM",
+    llm: "HostedLLM",
 ) -> list[str]:
     """Ask the LLM which subtopics are missing from retrieved docs.
 
@@ -82,7 +82,7 @@ def detect_knowledge_gaps(
 
 def autonomous_research_loop(
     topic: str,
-    llm: "OllamaLLM",
+    llm: "HostedLLM",
     rag: "LiteHybridRAG",
     citation_dag: "CitationDAG",
     task_id: str | None = None,

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agents.llm import OllamaLLM
+    from agents.llm import HostedLLM
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def compress_old_messages(
     messages: list[Any],
     task_desc: str,
     task_id: str,
-    llm: "OllamaLLM",
+    llm: "HostedLLM",
     keep_last: int = KEEP_LAST,
 ) -> MemorySummary:
     """Compress messages[:-keep_last] into a MemorySummary via LLM JSON call."""
@@ -130,7 +130,7 @@ def _render_summary_as_context(sm: MemorySummary) -> str:
 
 def build_context_with_memory(
     task: Any,
-    llm: "OllamaLLM",
+    llm: "HostedLLM",
     max_messages: int = COMPRESSION_THRESHOLD,
 ) -> tuple[str, list]:
     """Return (memory_context_text, recent_messages).

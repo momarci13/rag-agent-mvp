@@ -1,38 +1,43 @@
-# ROG-Agent MVP configuration
+# Quant Research Agent configuration
 # ---------------------------------------------------------------
-# One 7B model handles every role via system-prompt switching.
-# This is the sweet spot for 6-8 GB VRAM laptops (ROG Flow X13).
+# All model inference is hosted through OpenRouter. No local LLM or embedding
+# model is loaded by the application.
 
 llm:
-  # Primary model. Pull with: `ollama pull qwen2.5:7b-instruct-q4_K_M`
-  # ~4.7 GB on disk, ~5.5 GB VRAM at 8k context.
-  model: "qwen2.5:7b-instruct-q4_K_M"
-
-  # Multi-model support: list of available models with priorities
+  # OPENROUTER_* environment variables override these non-secret values.
+  # Non-free model routes also require ALLOW_PAID_INFERENCE=1.
+  provider_name: "OpenRouter"
+  base_url: "https://openrouter.ai/api/v1"
+  require_api_key: true
+  health_path: "/key"
+  model: "openrouter/free"
   models:
-    - name: "qwen2.5:7b-instruct-q4_K_M"
+    - name: "openrouter/free"
       priority: 1
-      min_vram_gb: 6
-
-  # Selection strategy: complexity_based, resource_based, or user_specified
-  selection_strategy: "complexity_based"
-
-  # Fallback for 4 GB VRAM machines (uncomment + change above):
-  # model: "qwen2.5:3b-instruct-q5_K_M"        # ~2.3 GB, weaker math
-
-  # Alternate if you prefer reasoning-distilled outputs (slower, verbose):
-  # model: "deepseek-r1:7b"                     # ~4.7 GB, adds <think> tokens
-
-  host: "http://localhost:11434"
-  num_ctx: 8192            # context window; raise to 16384 on 32 GB RAM
-  temperature: 0.2         # low for planning / critic / code
-  temperature_creative: 0.6  # writer role
-  timeout_s: 240           # qwen2.5:7b on laptop GPU needs up to 4 min for full analysis
-  fallback_timeout_s: 90   # Timeout per model in fallback chain
+      capabilities: ["reasoning", "quant", "research", "fast"]
+  selection_strategy: "priority"
+  role_models:
+    planner: "openrouter/free"
+    research: "openrouter/free"
+    quant: "openrouter/free"
+    model: "openrouter/free"
+    risk: "openrouter/free"
+    trader: "openrouter/free"
+    writer: "openrouter/free"
+    narrator: "openrouter/free"
+  extra_headers:
+    HTTP-Referer: "https://github.com/momarci13/rag-agent-mvp"
+    X-Title: "Quant Research RAG Agents"
+  temperature: 0.2
+  timeout_s: 240
+  fallback_timeout_s: 90
+  max_output_tokens: 4096
 
 rag:
   db_path: "./kb/chroma"
-  embedding_model: "BAAI/bge-small-en-v1.5"   # 130 MB, CPU-fast
+  # Separate collection avoids dimension conflicts with older embedding indexes.
+  collection: "openrouter-free-v1"
+  embedding_model: "nvidia/llama-nemotron-embed-vl-1b-v2:free"
   chunk_tokens: 256
   chunk_overlap: 32
   alpha_dense: 0.6          # hybrid weight: dense vs BM25
@@ -41,11 +46,11 @@ rag:
   token_budget: 3500        # packed context budget for the LLM
   query_expansion:
     enabled: true
-    method: "llm_then_local"    # try LLM first, fall back to rule-based
+    method: "llm_then_rules"    # hosted LLM first, then deterministic synonyms
     max_expansions: 3
   reranking:
     enabled: false
-    model: "local_cross_encoder"
+    model: "none"
     top_k_before_rerank: 50
     top_k_after_rerank: 6
   # Metadata filtering (optional): pass to retrieve() as dict:
@@ -73,6 +78,27 @@ trading:
   var_confidence: 0.99
   var_limit_pct: 0.05       # max 1-day 99% VaR as fraction of equity
   kelly_fraction: 0.33      # fractional Kelly (haircut on f*)
+
+ibkr:
+  # Orders are rejected unless the account is a paper account (normally DU*)
+  # and an explicit approval token is presented. Set IBKR_ACCOUNT in the env.
+  enabled: false
+  host: "127.0.0.1"
+  port: 7497
+  client_id: 71
+  paper_only: true
+  transmit: false
+  require_approval: true
+  max_order_notional: 10000.0
+  max_daily_notional: 25000.0
+  allowed_order_types: ["LMT"]
+
+quant_team:
+  model_risk:
+    min_sharpe: 0.0
+    min_deflated_sharpe: 0.50
+    max_drawdown: 0.25
+    max_var_99: 0.05
 
 writing:
   latex_engine: "pdflatex"  # or "pdflatex"; tectonic is a single binary

@@ -1,4 +1,4 @@
-// ROG-Agent — Chat UI + comprehensive report output
+// Quant Research Agents — Chat UI + comprehensive report output
 
 // ── State ────────────────────────────────────────────────────────────────────
 const state = {
@@ -9,6 +9,7 @@ const state = {
   // Chat state
   currentTaskId: null,
   isThinking: false,
+  quantRun: null,
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -50,8 +51,8 @@ function showSection(sectionId) {
   document.querySelectorAll('.section').forEach(sec =>
     sec.classList.toggle('active', sec.id === `${sectionId}-section`)
   );
-  const titles = { dashboard: 'Dashboard', tasks: 'Chat', reports: 'Report Viewer', data: 'Data Management', settings: 'Settings' };
-  $('pageTitle').textContent = titles[sectionId] || 'Finance Assistant.ai';
+  const titles = { dashboard: 'Dashboard', tasks: 'Chat', quant: 'Quant Team', reports: 'Report Viewer', data: 'Data Management', settings: 'Settings' };
+  $('pageTitle').textContent = titles[sectionId] || 'Quant Research Agents';
   state.currentSection = sectionId;
   localStorage.setItem('currentSection', sectionId);
 }
@@ -551,6 +552,147 @@ async function loadReports() {
 
 // ── Data ingestion ─────────────────────────────────────────────────────────────
 
+// Quant team
+
+function quantList(items) {
+  if (!Array.isArray(items) || items.length === 0) return '<span class="muted">None</span>';
+  return `<ul>${items.map(item => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>`;
+}
+
+function renderQuantRun(data) {
+  state.quantRun = data;
+  $('quantResult').hidden = false;
+  $('quantRunId').textContent = data.run_id || 'unknown';
+
+  const trace = Array.isArray(data.trace) ? data.trace : [];
+  $('quantTrace').innerHTML = trace.map(item => `
+    <div class="trace-item trace-${escapeHtml(item.status || 'unknown')}">
+      <div><strong>${escapeHtml(item.agent || 'agent')}</strong><span>${escapeHtml(item.status || '')}</span></div>
+      <p>${escapeHtml(item.summary || '')}</p>
+    </div>
+  `).join('') || '<span class="muted">No trace returned.</span>';
+
+  const research = data.research || {};
+  $('quantResearch').innerHTML = `
+    <p class="quant-thesis">${escapeHtml(research.thesis || 'No research brief returned.')}</p>
+    <h4>Evidence</h4>${quantList(research.evidence)}
+    <h4>Counter-evidence</h4>${quantList(research.counter_evidence)}
+    <h4>Assumptions</h4>${quantList(research.assumptions)}
+    <h4>Grounded source IDs</h4>${quantList(research.source_ids)}
+  `;
+
+  const strategy = data.strategy || {};
+  const backtest = data.backtest || {};
+  $('quantStrategy').innerHTML = `
+    <dl class="quant-kv">
+      <dt>Name</dt><dd>${escapeHtml(strategy.name || 'Not produced')}</dd>
+      <dt>Universe</dt><dd>${escapeHtml((strategy.universe || []).join(', '))}</dd>
+      <dt>Signal</dt><dd>${escapeHtml(strategy.signal || '')}</dd>
+      <dt>Sizing</dt><dd>${escapeHtml(strategy.position_sizing || '')}</dd>
+    </dl>
+    <h4>Backtest</h4>
+    <pre>${escapeHtml(JSON.stringify(backtest, null, 2))}</pre>
+  `;
+
+  const modelRisk = data.model_risk || {};
+  const executionRisk = data.execution_risk || {};
+  const intent = data.trade_intent || null;
+  const approved = Boolean(executionRisk.approved && executionRisk.approval_token && intent);
+  const modelPassed = Boolean(modelRisk.approved_for_order_proposal);
+  const badge = $('quantDecisionBadge');
+  badge.textContent = approved ? 'Human approval required' : (modelPassed ? 'Execution rejected' : 'Model rejected');
+  badge.className = `quant-badge ${approved ? 'approved' : 'rejected'}`;
+
+  $('quantRisk').innerHTML = `
+    <h4>Model risk gate</h4>
+    <p class="risk-state ${modelPassed ? 'pass' : 'fail'}">${modelPassed ? 'Passed' : 'Rejected'}</p>
+    ${quantList(modelRisk.reasons)}
+    <h4>IBKR execution gate</h4>
+    <p class="risk-state ${executionRisk.approved ? 'pass' : 'fail'}">${executionRisk.approved ? 'Passed — no order submitted' : 'Rejected'}</p>
+    ${quantList(executionRisk.reasons)}
+    <h4>Exact order preview</h4>
+    <pre>${escapeHtml(intent ? JSON.stringify(intent, null, 2) : 'No order was proposed.')}</pre>
+  `;
+
+  const executeButton = $('executeQuantBtn');
+  executeButton.hidden = !approved;
+  executeButton.disabled = !approved;
+  $('quantExecutionStatus').textContent = approved
+    ? 'Review every field. Submission still requires an exact confirmation phrase.'
+    : 'Nothing is eligible for broker submission.';
+}
+
+async function runQuantTeam() {
+  const task = $('quantTask')?.value.trim();
+  const apiToken = $('traderApiToken')?.value;
+  if (!task) { alert('Enter a quant research objective.'); return; }
+  if (!apiToken) { alert('Enter the TRADER_API_TOKEN configured on the server.'); return; }
+
+  const button = $('runQuantBtn');
+  const status = $('quantRunStatus');
+  button.disabled = true;
+  button.textContent = 'Running agents...';
+  status.textContent = 'Retrieving evidence and running the hosted free-model research/model/risk team. This may take several minutes.';
+  $('quantResult').hidden = true;
+  state.quantRun = null;
+
+  try {
+    const data = await fetchJson('/api/quant-team/run', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Trader-Token': apiToken,
+      },
+      body: JSON.stringify({ task }),
+    });
+    renderQuantRun(data);
+    status.textContent = 'Agent team completed. No broker order has been submitted.';
+    addActivityItem('🧠', `Quant team completed: ${(data.run_id || '').slice(0, 8)}`);
+  } catch (error) {
+    status.textContent = `Quant team failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Run agent team';
+  }
+}
+
+async function executeQuantOrder() {
+  const run = state.quantRun;
+  const intent = run?.trade_intent;
+  const approvalToken = run?.execution_risk?.approval_token;
+  const apiToken = $('traderApiToken')?.value;
+  if (!run || !intent || !approvalToken) return;
+  if (!apiToken) { alert('Enter the TRADER_API_TOKEN configured on the server.'); return; }
+
+  const phrase = `APPROVE ${intent.symbol} ${intent.action} ${intent.quantity}`;
+  const entered = window.prompt(`Review the exact preview above. Type this phrase to submit it:\n\n${phrase}`);
+  if (entered !== phrase) {
+    $('quantExecutionStatus').textContent = 'Order cancelled: confirmation phrase did not match.';
+    return;
+  }
+
+  const button = $('executeQuantBtn');
+  button.disabled = true;
+  $('quantExecutionStatus').textContent = 'Submitting the exact approved order to IBKR...';
+  try {
+    const receipt = await fetchJson(`/api/quant-team/${encodeURIComponent(run.run_id)}/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Trader-Token': apiToken,
+      },
+      body: JSON.stringify({ approval_token: approvalToken }),
+    });
+    run.execution_risk.approval_token = null;
+    button.hidden = true;
+    $('quantExecutionStatus').innerHTML = `Submitted. Receipt:<pre>${escapeHtml(JSON.stringify(receipt, null, 2))}</pre>`;
+    addActivityItem('🛡️', `IBKR paper order ${receipt.order_id} submitted`);
+  } catch (error) {
+    button.disabled = false;
+    $('quantExecutionStatus').textContent = `IBKR submission failed: ${error.message}`;
+  }
+}
+
 async function ingestDocuments() {
   const path = $('ingestPath')?.value.trim();
   if (!path) { alert('Please enter a document path'); return; }
@@ -605,6 +747,10 @@ function setupEventListeners() {
   // Data
   $('ingestBtn')?.addEventListener('click', ingestDocuments);
 
+  // Quant team
+  $('runQuantBtn')?.addEventListener('click', runQuantTeam);
+  $('executeQuantBtn')?.addEventListener('click', executeQuantOrder);
+
   // Reports
   $('refreshReportsBtn')?.addEventListener('click', loadReports);
 
@@ -613,13 +759,18 @@ function setupEventListeners() {
     const hs = $('healthStatus');
     if (hs) hs.textContent = 'Checking...';
     await loadSystemHealth();
-    if (hs) hs.textContent = state.systemHealth?.status === 'ok' ? 'System is healthy' : 'System has issues';
+    if (hs) {
+      const health = state.systemHealth || {};
+      hs.textContent = health.status === 'ok'
+        ? `Healthy — ${health.provider || 'hosted'} / ${health.model || 'configured model'}`
+        : `System has issues — ${health.provider || 'hosted inference'}`;
+    }
   });
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
     if (e.ctrlKey || e.metaKey) {
-      const map = { '1': 'dashboard', '2': 'tasks', '3': 'reports', '4': 'data', '5': 'settings' };
+      const map = { '1': 'dashboard', '2': 'tasks', '3': 'quant', '4': 'reports', '5': 'data', '6': 'settings' };
       if (map[e.key]) { e.preventDefault(); showSection(map[e.key]); }
     }
   });
@@ -638,11 +789,10 @@ async function init() {
   if (savedCollapsed) toggleSidebar();
 
   setupEventListeners();
+  showSection(savedSection);
 
   await Promise.all([loadSystemHealth(), loadConversationList(), loadDashboardStats(), loadReports()]);
-
-  showSection(savedSection);
-  addActivityItem('🚀', 'Finance Assistant.ai ready');
+  addActivityItem('🚀', 'Quant Research Agents ready');
 }
 
 // Global helpers for inline onclick attributes

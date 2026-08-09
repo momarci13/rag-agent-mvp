@@ -1,70 +1,25 @@
 #!/usr/bin/env bash
-# ROG-Agent MVP setup script (Linux / macOS / WSL2).
-# Usage:  bash setup.sh
+set -euo pipefail
 
-set -e
-
-echo "==> ROG-Agent MVP setup"
-
-# ---------- 1. Python venv ----------
-if [ ! -d ".venv" ]; then
-    echo "[1/4] Creating Python venv..."
-    python3 -m venv .venv
-fi
-# shellcheck disable=SC1091
-source .venv/bin/activate
-
-echo "[1/4] Upgrading pip..."
-python -m pip install --upgrade pip wheel setuptools >/dev/null
-
-echo "[2/4] Installing requirements (this can take ~5 min)..."
-pip install -r requirements.txt
-
-# ---------- 2. Ollama check ----------
-echo "[3/4] Checking Ollama..."
-if ! command -v ollama >/dev/null 2>&1; then
-    echo "  Ollama is NOT installed."
-    echo "  Install it with:"
-    echo "    Linux:  curl -fsSL https://ollama.com/install.sh | sh"
-    echo "    macOS:  brew install ollama   (or download from https://ollama.com)"
-    echo "  Then re-run this script."
-    exit 1
+echo "[1/3] Creating Python environment..."
+if [ ! -d .venv ]; then
+  python3 -m venv .venv
 fi
 
-# Start ollama if not running (Linux). On macOS, the desktop app handles this.
-if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
-    echo "  Starting ollama serve in the background..."
-    nohup ollama serve >/tmp/ollama.log 2>&1 &
-    sleep 3
-fi
+PYTHON=".venv/bin/python"
+echo "[2/3] Installing dependencies (no local model runtime)..."
+"$PYTHON" -m pip install --upgrade pip
+"$PYTHON" -m pip install -r requirements.txt
 
-MODEL="$(grep -E '^\s*model:' configs/config.yaml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-if [ -z "$MODEL" ]; then
-    MODEL="qwen2.5:7b-instruct-q4_K_M"
-fi
-echo "  Pulling model: $MODEL  (~4.7 GB; one-time download)"
-ollama pull "$MODEL"
-
-# ---------- 3. LaTeX (optional) ----------
-echo "[4/4] Checking LaTeX..."
-if command -v tectonic >/dev/null 2>&1; then
-    echo "  tectonic OK"
-elif command -v pdflatex >/dev/null 2>&1; then
-    echo "  pdflatex OK"
+echo "[3/3] Checking OpenRouter..."
+BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+BASE_URL="${BASE_URL%/}"
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  echo "  Set OPENROUTER_API_KEY to use hosted free models."
+elif curl -fsS --max-time 8 -H "Authorization: Bearer ${OPENROUTER_API_KEY}" "$BASE_URL/key" >/dev/null; then
+  echo "  OpenRouter is reachable at $BASE_URL"
 else
-    echo "  (optional) No LaTeX engine found. Writing tasks will save .tex but not .pdf."
-    echo "  To install tectonic (recommended, single binary, auto-fetches packages):"
-    echo "    curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh"
-    echo "    sudo mv tectonic /usr/local/bin/"
+  echo "  OpenRouter is not reachable or authorized at $BASE_URL"
 fi
 
-# ---------- 4. Healthcheck ----------
-echo
-echo "==> Running healthcheck..."
-python run.py --healthcheck || true
-
-echo
-echo "==> Setup complete."
-echo "    Activate the venv with:   source .venv/bin/activate"
-echo "    Try a task with:          python run.py \"Compute volatility of SPY 2020-2024\""
-echo "    Build the knowledge base: python run.py --ingest data/papers/"
+echo "Setup complete. Run: .venv/bin/python run.py --healthcheck"

@@ -1805,3 +1805,195 @@ textarea:focus {
 
 .dark .progress-bar-track { background: var(--bg-tertiary); }
 .dark .source-success { color: #4ade80; }
+
+/* Quant research / IBKR workflow */
+.quant-run-card,
+.quant-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.setting-note {
+  margin: 0 0 var(--space-md);
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.quant-run-card > label,
+.quant-auth-row label {
+  display: block;
+  color: var(--text-primary);
+  font-weight: 600;
+  margin-bottom: var(--spacing-xs);
+}
+
+.quant-run-card textarea,
+.quant-auth-row input {
+  width: 100%;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font: inherit;
+}
+
+.quant-run-card textarea:focus,
+.quant-auth-row input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.quant-auth-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  gap: var(--spacing-lg);
+  align-items: end;
+  margin-top: var(--spacing-md);
+}
+
+.quant-auth-row small,
+.muted {
+  color: var(--text-muted);
+}
+
+.quant-status,
+.quant-execution-status {
+  color: var(--text-secondary);
+  margin-top: var(--spacing-md);
+}
+
+.quant-result {
+  margin-top: var(--spacing-lg);
+}
+
+.quant-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+
+.quant-label {
+  color: var(--text-muted);
+  margin-right: var(--spacing-xs);
+}
+
+.quant-badge,
+.risk-state {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+}
+
+.quant-badge.approved,
+.risk-state.pass {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.quant-badge.rejected,
+.risk-state.fail {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.dark .quant-badge.approved,
+.dark .risk-state.pass { color: #86efac; background: #14532d; }
+.dark .quant-badge.rejected,
+.dark .risk-state.fail { color: #fca5a5; background: #7f1d1d; }
+
+.quant-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-lg);
+}
+
+.quant-panel h3 {
+  margin-bottom: var(--spacing-md);
+}
+
+.quant-panel h4 {
+  color: var(--text-primary);
+  margin: var(--spacing-md) 0 var(--spacing-xs);
+}
+
+.quant-panel ul {
+  color: var(--text-secondary);
+  padding-left: var(--spacing-lg);
+}
+
+.quant-panel pre,
+.quant-execution-status pre {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+}
+
+.quant-thesis {
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.quant-kv {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) 1fr;
+  gap: var(--spacing-xs) var(--spacing-md);
+}
+
+.quant-kv dt { color: var(--text-muted); font-weight: 600; }
+.quant-kv dd { color: var(--text-primary); margin: 0; }
+
+.trace-item {
+  border-left: 3px solid var(--border-secondary);
+  padding: var(--spacing-sm) var(--spacing-md);
+  margin-bottom: var(--spacing-sm);
+  background: var(--bg-secondary);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.trace-item > div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.trace-item span,
+.trace-item p { color: var(--text-secondary); }
+.trace-item p { margin: var(--spacing-xs) 0 0; }
+.trace-ok,
+.trace-approval_required { border-left-color: #22c55e; }
+.trace-rejected { border-left-color: #ef4444; }
+
+.btn-danger {
+  margin-top: var(--spacing-md);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  color: #fff;
+  background: #b91c1c;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.btn-danger:hover:not(:disabled) { background: #991b1b; }
+.btn-danger:disabled { cursor: not-allowed; opacity: 0.55; }
+
+@media (max-width: 900px) {
+  .quant-grid,
+  .quant-auth-row { grid-template-columns: 1fr; }
+  .quant-auth-row .btn-primary { width: 100%; }
+}

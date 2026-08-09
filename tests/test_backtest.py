@@ -92,7 +92,29 @@ def test_portfolio_backtest_runs():
 
 
 def test_compile_signal_blocks_imports():
-    # Sanity: the signal compiler strips builtins so `import` isn't usable
-    with pytest.raises(Exception):
-        sig = compile_signal("__import__('os').system('echo bad')")
-        sig(_synthetic_prices(50))
+    with pytest.raises(ValueError, match="not allowed"):
+        compile_signal("__import__('os').system('echo bad')")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "df.__class__.__mro__",
+        "df['close'].to_pickle('signal.pkl')",
+        "np.load('untrusted.npy')",
+        "(lambda: 1)()",
+    ],
+)
+def test_compile_signal_rejects_object_traversal_and_io(code):
+    with pytest.raises(ValueError, match="not allowed"):
+        compile_signal(code)
+
+
+def test_compile_signal_allows_bounded_numpy_expression():
+    df = _synthetic_prices(n=100, seed=9)
+    signal = compile_signal(
+        "np.where(df['close'] > df['close'].rolling(20).mean(), 1.0, 0.0)"
+    )
+    out = signal(df)
+    assert isinstance(out, pd.Series)
+    assert set(out.unique()) <= {0.0, 1.0}

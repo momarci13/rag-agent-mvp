@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""ROG-Agent MVP — single-file CLI entrypoint.
+"""Quant Research + IBKR RAG Agents CLI entrypoint.
 
 Examples:
     python run.py "Compute the volatility of SPY over 2020-2024 with bootstrap CIs"
@@ -12,19 +12,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-from agents.llm import LLMConfig, OllamaLLM, ModelSpec, ModelSelectionStrategy
+from agents.llm import HostedLLM, LLMConfig, ModelSpec, ModelSelectionStrategy
 from tools.backtest import (
     BacktestConfig,
     compile_signal,
     run_portfolio_backtest,
 )
-from tools.data import fetch_yahoo, MultiSourceFetcher
+from tools.data import MultiSourceFetcher
 from tools.multifidelity_kan import (
     ResidualKAN,
     evaluate_regression,
@@ -37,31 +39,75 @@ from tools.tex import build_latex_artifact
 ROOT = Path(__file__).resolve().parent
 
 
+def _env_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_free_openrouter_route(model: str) -> bool:
+    return model == "openrouter/free" or model.endswith(":free")
+
+
 def load_config(path: str = "configs/config.yaml") -> dict:
     with open(ROOT / path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    embedding_override = os.getenv("OPENROUTER_EMBEDDING_MODEL", "").strip()
+    if embedding_override:
+        cfg["rag"]["embedding_model"] = embedding_override
+    if (
+        not _is_free_openrouter_route(cfg["rag"]["embedding_model"])
+        and not _env_enabled("ALLOW_PAID_INFERENCE")
+    ):
+        raise ValueError(
+            "A paid embedding route requires ALLOW_PAID_INFERENCE=1"
+        )
+    return cfg
 
 
 def make_llm_config(cfg: dict) -> LLMConfig:
-    """Create LLMConfig from config dict, handling multi-model setup."""
+    """Create hosted OpenRouter config; secrets come from the environment."""
     llm_cfg = cfg["llm"]
-    models = None
+    models: list[ModelSpec] | None = None
     if "models" in llm_cfg:
         models = [ModelSpec(**m) for m in llm_cfg["models"]]
 
-    strategy = ModelSelectionStrategy.COMPLEXITY_BASED
+    model_override = os.getenv("OPENROUTER_MODEL", "").strip()
+    selected_model = model_override or llm_cfg["model"]
+    if (
+        not _is_free_openrouter_route(selected_model)
+        and not _env_enabled("ALLOW_PAID_INFERENCE")
+    ):
+        raise ValueError("A paid chat route requires ALLOW_PAID_INFERENCE=1")
+    if model_override:
+        models = [ModelSpec(name=model_override, priority=0)] + [
+            item for item in (models or []) if item.name != model_override
+        ]
+
+    strategy = ModelSelectionStrategy.PRIORITY
     if "selection_strategy" in llm_cfg:
         strategy = ModelSelectionStrategy(llm_cfg["selection_strategy"])
 
+    role_models = dict(llm_cfg.get("role_models", {}))
+    if model_override:
+        role_models = {role: model_override for role in role_models}
+
     return LLMConfig(
-        model=llm_cfg["model"],
-        host=llm_cfg.get("host", "http://localhost:11434"),
-        num_ctx=llm_cfg.get("num_ctx", 8192),
+        model=selected_model,
+        base_url=os.getenv(
+            "OPENROUTER_BASE_URL",
+            llm_cfg.get("base_url", "https://openrouter.ai/api/v1"),
+        ),
+        api_key=os.getenv("OPENROUTER_API_KEY", ""),
+        provider_name=llm_cfg.get("provider_name", "OpenRouter"),
+        require_api_key=bool(llm_cfg.get("require_api_key", True)),
+        health_path=llm_cfg.get("health_path", "/key"),
         temperature=llm_cfg.get("temperature", 0.2),
         timeout_s=llm_cfg.get("timeout_s", 180),
+        max_output_tokens=llm_cfg.get("max_output_tokens", 8192),
         models=models,
         selection_strategy=strategy,
         fallback_timeout_s=llm_cfg.get("fallback_timeout_s", 60),
+        role_models=role_models,
+        extra_headers=llm_cfg.get("extra_headers", {}),
     )
 
 
@@ -157,13 +203,13 @@ def run_kan_demo(samples: int = 400, random_state: int = 123) -> dict[str, Any]:
 def healthcheck(cfg: dict) -> int:
     from rag.hybrid import LiteHybridRAG
 
-    print("== Finance Assistant.ai healthcheck ==")
+    print("== Quant Research Agent healthcheck ==")
     llm_cfg = make_llm_config(cfg)
-    llm = OllamaLLM(llm_cfg)
+    llm = HostedLLM(llm_cfg)
     ok = llm.health()
-    print(f"[{'OK' if ok else 'FAIL'}] Ollama reachable at {cfg['llm']['host']}")
+    print(f"[{'OK' if ok else 'FAIL'}] OpenRouter key validation at {llm_cfg.base_url}")
     if not ok:
-        print("    → Start Ollama: `ollama serve` (or ensure the desktop app is running).")
+        print("    -> Set OPENROUTER_API_KEY to a key from the OpenRouter dashboard.")
         return 1
 
     try:
@@ -172,16 +218,17 @@ def healthcheck(cfg: dict) -> int:
             temperature=0.0,
         )
         ok_llm = "pong" in reply.lower()
-        print(f"[{'OK' if ok_llm else 'WARN'}] Model {cfg['llm']['model']} responded: {reply[:60]!r}")
+        print(f"[{'OK' if ok_llm else 'WARN'}] Hosted model {llm_cfg.model} responded: {reply[:60]!r}")
     except Exception as e:
         print(f"[FAIL] Model call failed: {e}")
-        print(f"    → Pull the model: `ollama pull {cfg['llm']['model']}`")
+        print("    -> Confirm the OpenRouter key is valid and the selected route is available.")
         return 1
 
     # RAG
     try:
         rag = LiteHybridRAG(
             db_path=cfg["rag"]["db_path"],
+            collection=cfg["rag"].get("collection", "openrouter-free-v1"),
             embedding_model=cfg["rag"]["embedding_model"],
             alpha_dense=cfg["rag"]["alpha_dense"],
             query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
@@ -193,8 +240,15 @@ def healthcheck(cfg: dict) -> int:
             top_k_after_rerank=cfg["rag"]["reranking"]["top_k_after_rerank"],
         )
         print(f"[OK] RAG ready. {len(rag)} chunks in store.")
+        probe = rag.emb.encode(["hosted embedding health probe"])
+        if probe.shape[0] != 1 or probe.shape[1] < 1:
+            raise ValueError(f"Unexpected embedding shape: {probe.shape}")
+        print(
+            f"[OK] Hosted embedding {cfg['rag']['embedding_model']} "
+            f"returned {probe.shape[1]} dimensions."
+        )
     except Exception as e:
-        print(f"[FAIL] RAG init: {e}")
+        print(f"[FAIL] RAG/embedding check: {e}")
         return 1
 
     # Market data
@@ -205,12 +259,12 @@ def healthcheck(cfg: dict) -> int:
     except Exception as e:
         print(f"[WARN] yfinance: {e}")
 
-    print("\nAll green — run a task with: python run.py \"your task here\"")
+    print("\nAll green - run a task with: python run.py \"your task here\"")
     return 0
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Finance Assistant.ai")
+    ap = argparse.ArgumentParser(description="Hosted Free-Model Quant Research + IBKR RAG Agents")
     ap.add_argument("task", nargs="?", help="natural-language task")
     ap.add_argument("--ingest", metavar="PATH", help="ingest files/dir into the KB")
     ap.add_argument("--collection", default=None, help="override the RAG collection name")
@@ -224,7 +278,11 @@ def main():
     ap.add_argument("--research", action="store_true",
                     help="Full staged research pipeline (literature + hypothesis + experiment + KG)")
     ap.add_argument("--auto-research", action="store_true",
-                    help="Autonomous iterative research loop (SEARCH→GAP-DETECT→EXPAND→REPORT)")
+                    help="Autonomous iterative research loop (SEARCH->GAP-DETECT->EXPAND->REPORT)")
+    ap.add_argument("--quant-team", action="store_true",
+                    help="Run the RAG/research/model/risk/IBKR multi-agent pipeline")
+    ap.add_argument("--submit-paper", action="store_true",
+                    help="Interactively approve submission to configured IBKR paper TWS")
     ap.add_argument("--iterations", type=int, default=None,
                     help="Number of iterations for --auto-research (default: from config)")
     ap.add_argument("--n-papers", type=int, default=None,
@@ -329,13 +387,14 @@ def main():
 
     # Build services
     llm_cfg = make_llm_config(cfg)
-    llm = OllamaLLM(llm_cfg)
+    llm = HostedLLM(llm_cfg)
     if not llm.health():
-        print("ERROR: Ollama not reachable. Run `python run.py --healthcheck`.", file=sys.stderr)
+        print("ERROR: OpenRouter is not configured or reachable. Run `python run.py --healthcheck`.", file=sys.stderr)
         sys.exit(1)
 
     rag = LiteHybridRAG(
         db_path=cfg["rag"]["db_path"],
+        collection=cfg["rag"].get("collection", "openrouter-free-v1"),
         embedding_model=cfg["rag"]["embedding_model"],
         alpha_dense=cfg["rag"]["alpha_dense"],
         query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
@@ -349,6 +408,40 @@ def main():
 
     tools = make_tools(cfg)
     max_iter = args.max_iter or cfg["agent"]["max_iterations"]
+
+    if args.quant_team:
+        from agents.quant_factory import create_quant_team
+
+        team = create_quant_team(cfg, llm, rag, tools["backtest"])
+        team_run = team.run(args.task)
+        safe_payload = team_run.model_dump(mode="json")
+        if safe_payload.get("execution_risk"):
+            safe_payload["execution_risk"]["approval_token"] = None
+        quant_dir = Path(args.out) / "quant_team"
+        quant_dir.mkdir(parents=True, exist_ok=True)
+        quant_path = quant_dir / f"{team_run.run_id}.json"
+        quant_path.write_text(json.dumps(safe_payload, indent=2), encoding="utf-8")
+        print(json.dumps(safe_payload, indent=2))
+        print(f"\n[saved] {quant_path}")
+
+        if args.submit_paper:
+            risk = team_run.execution_risk
+            if not risk or not risk.approved or not team_run.trade_intent:
+                print("Order was not eligible for IBKR submission.", file=sys.stderr)
+                sys.exit(2)
+            approval_phrase = (
+                f"APPROVE {team_run.trade_intent.symbol} "
+                f"{team_run.trade_intent.action} {team_run.trade_intent.quantity}"
+            )
+            confirmation = input(
+                f"Type {approval_phrase} to submit this exact paper order: "
+            ).strip()
+            if confirmation != approval_phrase:
+                print("Order cancelled; confirmation did not match.")
+                return
+            receipt = team.execute(team_run, risk.approval_token or "")
+            print(json.dumps(receipt.model_dump(mode="json"), indent=2))
+        return
 
     if args.auto_research:
         from tools.research_loop import autonomous_research_loop

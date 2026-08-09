@@ -3,16 +3,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from agents.llm import HostedLLM
+from run import load_config, make_llm_config, make_tools, run_kan_demo
+from tools import task_conversation, task_storage
 
 try:
     from sse_starlette.sse import EventSourceResponse
@@ -24,31 +31,14 @@ logger = logging.getLogger(__name__)
 
 # In-memory registry for background task progress
 _bg_tasks: dict[str, dict] = {}
-
-from run import load_config, make_llm_config, make_tools, run_kan_demo
-from agents.llm import LLMConfig, OllamaLLM
-from tools.backtest import BacktestConfig, compile_signal, run_portfolio_backtest
-from tools.data import fetch_yahoo
-from tools import task_storage, task_conversation
+_quant_runs: dict[str, tuple[Any, Any]] = {}
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "configs" / "config.yaml"
 OUTPUT_RUNS = ROOT / "output" / "runs"
 OUTPUT_RUNS.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Finance Assistant.ai")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.mount("/static", StaticFiles(directory=ROOT / "web"), name="static")
-
-
 # Startup: configure logging + run migration from legacy format
-@app.on_event("startup")
 async def startup_migration():
     (ROOT / "output").mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -67,13 +57,38 @@ async def startup_migration():
         logger.warning("[STARTUP] Migration warning: %s", e)
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await startup_migration()
+    yield
+
+
+app = FastAPI(title="Quant Research + IBKR RAG Agents", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/static", StaticFiles(directory=ROOT / "web"), name="static")
+
+
 def _config() -> dict[str, Any]:
     return load_config(str(CONFIG_PATH))
 
 
-def _llm(cfg: dict[str, Any]) -> OllamaLLM:
+def _llm(cfg: dict[str, Any]) -> HostedLLM:
     llm_cfg = make_llm_config(cfg)
-    return OllamaLLM(llm_cfg)
+    return HostedLLM(llm_cfg)
+
+
+def _require_trader_auth(provided: str | None) -> None:
+    expected = os.getenv("TRADER_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(503, "Trading API is disabled until TRADER_API_TOKEN is configured")
+    if provided is None or not secrets.compare_digest(provided, expected):
+        raise HTTPException(401, "Invalid X-Trader-Token")
 
 
 def _rag(cfg: dict[str, Any]):
@@ -83,6 +98,7 @@ def _rag(cfg: dict[str, Any]):
         raise HTTPException(500, f"RAG backend unavailable: {exc}")
     return LiteHybridRAG(
         db_path=cfg["rag"]["db_path"],
+        collection=cfg["rag"].get("collection", "openrouter-free-v1"),
         embedding_model=cfg["rag"]["embedding_model"],
         alpha_dense=cfg["rag"]["alpha_dense"],
         query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
@@ -271,6 +287,14 @@ class AutonomousResearchRequest(BaseModel):
     n_papers_per_iter: int = 6
 
 
+class QuantTeamRequest(BaseModel):
+    task: str
+
+
+class QuantExecutionRequest(BaseModel):
+    approval_token: str
+
+
 @app.get("/", response_class=FileResponse)
 async def index():
     return ROOT / "web" / "index.html"
@@ -293,13 +317,21 @@ async def health() -> dict[str, Any]:
         rag_count = None
         return {"status": "partial", "llm": llm_ok, "rag": str(exc.detail)}
 
-    return {"status": "ok", "llm": llm_ok, "rag_chunks": rag_count}
+    llm_settings = getattr(llm, "cfg", None)
+    return {
+        "status": "ok" if llm_ok else "partial",
+        "llm": llm_ok,
+        "provider": getattr(llm_settings, "provider_name", cfg["llm"].get("provider_name")),
+        "model": getattr(llm_settings, "model", cfg["llm"]["model"]),
+        "embedding_model": cfg["rag"]["embedding_model"],
+        "rag_chunks": rag_count,
+    }
 
 
 @app.post("/run-task")
 async def run_task(payload: TaskRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
     cfg = _config()
-    # Quick LLM health-check before queuing (fast, catches offline Ollama early)
+    # Quick hosted-model health-check before queuing.
     if not _llm(cfg).health():
         raise HTTPException(500, "LLM is not healthy or unreachable.")
     task_id = str(uuid4())
@@ -321,6 +353,55 @@ async def research_task(payload: ResearchTaskRequest, background_tasks: Backgrou
         task_id, payload.task, payload.n_papers, payload.kg_enabled, cfg,
     )
     return {"status": "queued", "task_id": task_id}
+
+
+@app.post("/api/quant-team/run")
+async def run_quant_team(
+    payload: QuantTeamRequest,
+    x_trader_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Run the hosted agent team and return an IBKR paper-order preview."""
+    from agents.quant_factory import create_quant_team
+
+    _require_trader_auth(x_trader_token)
+    cfg = _config()
+    llm = _llm(cfg)
+    if not llm.health():
+        raise HTTPException(503, "OpenRouter is unavailable or unauthorized")
+    rag = _rag(cfg)
+    tools = make_tools(cfg)
+    team = create_quant_team(cfg, llm, rag, tools["backtest"])
+    try:
+        result = await asyncio.to_thread(team.run, payload.task)
+    except Exception as exc:
+        logger.exception("Quant team failed")
+        raise HTTPException(500, f"Quant team failed: {exc}") from exc
+    _quant_runs[result.run_id] = (team, result)
+    return result.model_dump(mode="json")
+
+
+@app.post("/api/quant-team/{run_id}/execute")
+async def execute_quant_order(
+    run_id: str,
+    payload: QuantExecutionRequest,
+    x_trader_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Consume a one-time approval token and submit the exact previewed order."""
+    _require_trader_auth(x_trader_token)
+    item = _quant_runs.get(run_id)
+    if item is None:
+        raise HTTPException(404, "Quant team run not found or server restarted")
+    team, result = item
+    if result.trade_intent is None:
+        raise HTTPException(409, "This run has no order eligible for execution")
+    try:
+        receipt = await asyncio.to_thread(team.execute, result, payload.approval_token)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("IBKR execution failed")
+        raise HTTPException(502, f"IBKR execution failed: {exc}") from exc
+    return receipt.model_dump(mode="json")
 
 
 @app.get("/api/reports/{task_id}/pdf", response_class=FileResponse)
@@ -457,6 +538,7 @@ async def ingest(payload: IngestRequest) -> dict[str, Any]:
 
     rag = LiteHybridRAG(
         db_path=cfg["rag"]["db_path"],
+        collection=cfg["rag"].get("collection", "openrouter-free-v1"),
         embedding_model=cfg["rag"]["embedding_model"],
         alpha_dense=cfg["rag"]["alpha_dense"],
         query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],

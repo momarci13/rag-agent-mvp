@@ -112,16 +112,22 @@ class RetrievalMetrics:
             "avg_retrieved_count": avg_retrieved,
         }
 
-    def save(self) -> None:
-        """Save metrics to JSON file."""
+    def save(self, filename: str | None = None) -> Path:
+        """Save metrics to JSON and return the written path.
+
+        ``filename`` is retained for compatibility with the original Phase 1
+        smoke test; callers that omit it use ``retrieval_metrics.json``.
+        """
+        target = self.output_dir / filename if filename else self.metrics_file
         data = {
             "timestamp": datetime.utcnow().isoformat(),
             "queries": self.queries,
             "summary": self.compute_averages(),
         }
-        with open(self.metrics_file, "w") as f:
+        with open(target, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        print(f"Metrics saved to {self.metrics_file}")
+        print(f"Metrics saved to {target}")
+        return target
 
     def summary(self) -> dict:
         """Alias for compute_averages to support legacy metric interfaces."""

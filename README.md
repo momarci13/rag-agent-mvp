@@ -5,12 +5,12 @@ backtesting, retrieval-augmented analysis, and controlled IBKR paper-order
 submission.
 
 The application does **not** run Ollama, a local LLM, or a local embedding
-model. Chat and embedding inference use
-[OpenRouter](https://openrouter.ai/) through its OpenAI-compatible API. The
-default chat route is `openrouter/free`, and the default hosted embedding route
-is `nvidia/llama-nemotron-embed-vl-1b-v2:free`; both have zero token price.
-Free-route capacity and model choice can change, so this mode is intended for
-personal research and prototyping rather than guaranteed production service.
+model. Chat and embedding inference use the direct
+[OpenAI API](https://platform.openai.com/). The default chat model is
+`gpt-5.1-mini` (with `gpt-5.1` for higher-reasoning roles), and the default
+embedding model is `text-embedding-3-large` -- confirm the exact model IDs you
+want billed against before deploying. Every call incurs real OpenAI API cost;
+there is no free tier to fall back to.
 
 ## Agent team
 
@@ -56,10 +56,10 @@ inference client.
 user task
    |
    v
-RAG Agent -- OpenRouter /embeddings --> free hosted embedding model
+RAG Agent -- OpenAI /embeddings --> text-embedding-3-large
    |
    v
-Research Agent --> OpenRouter free router /chat/completions
+Research Agent --> OpenAI /chat/completions
    |
    v
 Model Agent --> StrategySpec --> historical data --> backtest
@@ -80,7 +80,7 @@ TWS / IB Gateway (paper account, transmit disabled by default)
 ## Requirements
 
 - Python 3.11+
-- A free OpenRouter account and API key
+- An OpenAI API account and API key (billed usage; no free tier)
 - For broker submission only: IBKR TWS or IB Gateway with API access enabled
   and a paper account
 
@@ -111,38 +111,31 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-### 2. Configure free hosted inference
+### 2. Configure OpenAI access
 
-Create an OpenRouter API key and set it locally. No gateway process is needed.
+Create an OpenAI API key and set it locally. No gateway process is needed.
 
 Windows PowerShell:
 
 ```powershell
-$env:OPENROUTER_API_KEY = "sk-or-v1-..."
+$env:OPENAI_API_KEY = "sk-..."
 ```
 
 Linux/macOS:
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
+export OPENAI_API_KEY="sk-..."
 ```
 
 Secrets are read only from environment variables and are never stored in
-`config.yaml`. `OPENROUTER_BASE_URL` is optional; the default is
-`https://openrouter.ai/api/v1`.
+`config.yaml`. `OPENAI_BASE_URL` is optional, for pointing at an Azure/
+OpenAI-compatible proxy instead of `https://api.openai.com/v1`.
 
-The free router does not include free Claude inference. To prefer Claude later,
-add OpenRouter credits and select a current Anthropic route without changing
-code, for example:
+Override the default chat model for every role without changing code:
 
 ```powershell
-$env:OPENROUTER_MODEL = "anthropic/claude-sonnet-5"
-$env:ALLOW_PAID_INFERENCE = "1"
+$env:OPENAI_MODEL = "gpt-5.1"
 ```
-
-Unset `OPENROUTER_MODEL` and `ALLOW_PAID_INFERENCE` to return to zero-cost
-routing. The second variable is an intentional cost gate: the application
-rejects non-free chat or embedding routes without it.
 
 Verify the connection:
 
@@ -152,20 +145,16 @@ python run.py --healthcheck
 
 ### 3. Build the RAG knowledge base
 
-Embedding inference goes through OpenRouter:
+Embedding inference goes through OpenAI:
 
 ```bash
 python run.py --ingest data/papers/
 ```
 
-The default embedding route is
-`nvidia/llama-nemotron-embed-vl-1b-v2:free`. Override it with
-`OPENROUTER_EMBEDDING_MODEL`. The default Chroma collection is
-`openrouter-free-v1`, which avoids mixing vectors from the earlier backend.
-
-OpenRouter's zero-cost chat tier has a low daily request allowance, and this
-multi-agent workflow uses several calls per run. Rate-limit responses are
-reported rather than silently switching to a paid model.
+The default embedding model is `text-embedding-3-large`. Override it with
+`OPENAI_EMBEDDING_MODEL`. The default Chroma collection is `openai-embed-v1`,
+which avoids mixing vectors from a different embedding model's dimensionality.
+Changing the embedding model requires re-ingesting into a new collection name.
 
 ## Run research
 
@@ -264,7 +253,7 @@ knowledge-graph summaries.
 
 Main settings are in `configs/config.yaml`:
 
-- `llm`: OpenRouter endpoint, free/optional model routes, role routes, timeouts
+- `llm`: OpenAI model routes, per-role routes, timeouts
 - `rag`: hosted embedding route, Chroma/BM25 fusion, query expansion
 - `trading`: backtest and portfolio limits
 - `ibkr`: broker connectivity, paper/transmit gates, notional limits
@@ -281,15 +270,15 @@ python -m pytest -q
 ```
 
 The test suite uses HTTP mock transports, deterministic non-model vectors, and
-a fake broker. It does not call OpenRouter or IBKR.
+a fake broker. It does not call OpenAI or IBKR.
 
 The exact count can vary as optional dependency tests are skipped.
 
 ## Key files
 
 ```text
-agents/llm.py             hosted OpenAI-compatible chat client
-rag/embeddings.py         hosted OpenAI-compatible embedding client
+agents/llm.py             direct OpenAI chat client
+rag/embeddings.py         direct OpenAI embedding client
 agents/quant_team.py      typed multi-agent pipeline
 agents/quant_factory.py   production dependency composition
 broker/ibkr.py            official TWS API adapter + safety boundary

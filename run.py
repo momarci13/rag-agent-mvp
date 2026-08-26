@@ -43,40 +43,30 @@ def _env_enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _is_free_openrouter_route(model: str) -> bool:
-    return model == "openrouter/free" or model.endswith(":free")
-
-
 def load_config(path: str = "configs/config.yaml") -> dict:
     with open(ROOT / path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    embedding_override = os.getenv("OPENROUTER_EMBEDDING_MODEL", "").strip()
+    embedding_override = os.getenv("OPENAI_EMBEDDING_MODEL", "").strip()
     if embedding_override:
         cfg["rag"]["embedding_model"] = embedding_override
-    if (
-        not _is_free_openrouter_route(cfg["rag"]["embedding_model"])
-        and not _env_enabled("ALLOW_PAID_INFERENCE")
-    ):
-        raise ValueError(
-            "A paid embedding route requires ALLOW_PAID_INFERENCE=1"
-        )
     return cfg
 
 
 def make_llm_config(cfg: dict) -> LLMConfig:
-    """Create hosted OpenRouter config; secrets come from the environment."""
+    """Create the direct OpenAI client config; secrets come from the environment.
+
+    NOTE: every call made through this config incurs real OpenAI API cost --
+    there is no "free tier" route to gate on the way the old OpenRouter setup
+    had. Model IDs below are placeholders; confirm the exact IDs you want
+    billed against before deploying.
+    """
     llm_cfg = cfg["llm"]
     models: list[ModelSpec] | None = None
     if "models" in llm_cfg:
         models = [ModelSpec(**m) for m in llm_cfg["models"]]
 
-    model_override = os.getenv("OPENROUTER_MODEL", "").strip()
+    model_override = os.getenv("OPENAI_MODEL", "").strip()
     selected_model = model_override or llm_cfg["model"]
-    if (
-        not _is_free_openrouter_route(selected_model)
-        and not _env_enabled("ALLOW_PAID_INFERENCE")
-    ):
-        raise ValueError("A paid chat route requires ALLOW_PAID_INFERENCE=1")
     if model_override:
         models = [ModelSpec(name=model_override, priority=0)] + [
             item for item in (models or []) if item.name != model_override
@@ -92,14 +82,10 @@ def make_llm_config(cfg: dict) -> LLMConfig:
 
     return LLMConfig(
         model=selected_model,
-        base_url=os.getenv(
-            "OPENROUTER_BASE_URL",
-            llm_cfg.get("base_url", "https://openrouter.ai/api/v1"),
-        ),
-        api_key=os.getenv("OPENROUTER_API_KEY", ""),
-        provider_name=llm_cfg.get("provider_name", "OpenRouter"),
+        base_url=os.getenv("OPENAI_BASE_URL") or llm_cfg.get("base_url") or None,
+        api_key=os.getenv("OPENAI_API_KEY", ""),
+        provider_name=llm_cfg.get("provider_name", "OpenAI"),
         require_api_key=bool(llm_cfg.get("require_api_key", True)),
-        health_path=llm_cfg.get("health_path", "/key"),
         temperature=llm_cfg.get("temperature", 0.2),
         timeout_s=llm_cfg.get("timeout_s", 180),
         max_output_tokens=llm_cfg.get("max_output_tokens", 8192),
@@ -107,7 +93,6 @@ def make_llm_config(cfg: dict) -> LLMConfig:
         selection_strategy=strategy,
         fallback_timeout_s=llm_cfg.get("fallback_timeout_s", 60),
         role_models=role_models,
-        extra_headers=llm_cfg.get("extra_headers", {}),
     )
 
 
@@ -207,9 +192,9 @@ def healthcheck(cfg: dict) -> int:
     llm_cfg = make_llm_config(cfg)
     llm = HostedLLM(llm_cfg)
     ok = llm.health()
-    print(f"[{'OK' if ok else 'FAIL'}] OpenRouter key validation at {llm_cfg.base_url}")
+    print(f"[{'OK' if ok else 'FAIL'}] OpenAI key validation at {llm_cfg.base_url}")
     if not ok:
-        print("    -> Set OPENROUTER_API_KEY to a key from the OpenRouter dashboard.")
+        print("    -> Set OPENAI_API_KEY to a key from the OpenAI dashboard.")
         return 1
 
     try:
@@ -221,14 +206,14 @@ def healthcheck(cfg: dict) -> int:
         print(f"[{'OK' if ok_llm else 'WARN'}] Hosted model {llm_cfg.model} responded: {reply[:60]!r}")
     except Exception as e:
         print(f"[FAIL] Model call failed: {e}")
-        print("    -> Confirm the OpenRouter key is valid and the selected route is available.")
+        print("    -> Confirm the OpenAI key is valid and the selected model is available.")
         return 1
 
     # RAG
     try:
         rag = LiteHybridRAG(
             db_path=cfg["rag"]["db_path"],
-            collection=cfg["rag"].get("collection", "openrouter-free-v1"),
+            collection=cfg["rag"].get("collection", "openai-embed-v1"),
             embedding_model=cfg["rag"]["embedding_model"],
             alpha_dense=cfg["rag"]["alpha_dense"],
             query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
@@ -389,12 +374,12 @@ def main():
     llm_cfg = make_llm_config(cfg)
     llm = HostedLLM(llm_cfg)
     if not llm.health():
-        print("ERROR: OpenRouter is not configured or reachable. Run `python run.py --healthcheck`.", file=sys.stderr)
+        print("ERROR: OpenAI is not configured or reachable. Run `python run.py --healthcheck`.", file=sys.stderr)
         sys.exit(1)
 
     rag = LiteHybridRAG(
         db_path=cfg["rag"]["db_path"],
-        collection=cfg["rag"].get("collection", "openrouter-free-v1"),
+        collection=cfg["rag"].get("collection", "openai-embed-v1"),
         embedding_model=cfg["rag"]["embedding_model"],
         alpha_dense=cfg["rag"]["alpha_dense"],
         query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],

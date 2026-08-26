@@ -94,8 +94,8 @@ class LiteHybridRAG:
     def __init__(
         self,
         db_path: str = "./kb/chroma",
-        collection: str = "openrouter-free-v1",
-        embedding_model: str = "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+        collection: str = "openai-embed-v1",
+        embedding_model: str = "text-embedding-3-large",
         embedding_client: EmbeddingClient | None = None,
         alpha_dense: float = 0.6,
         query_expansion_enabled: bool = False,

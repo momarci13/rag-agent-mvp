@@ -1,13 +1,14 @@
 # Web setup
 
-The web server uses hosted chat and embedding inference through OpenRouter. It
-does not require Ollama, a GPU, or local model files.
+The web server uses hosted chat and embedding inference through the direct
+OpenAI API. It does not require Ollama, a GPU, or local model files. Every
+call incurs real, billed OpenAI API cost.
 
 ## Start
 
 ```powershell
 ./setup.ps1
-$env:OPENROUTER_API_KEY = "sk-or-v1-..."
+$env:OPENAI_API_KEY = "sk-..."
 $env:TRADER_API_TOKEN = "use-a-long-random-secret"
 ./.venv/Scripts/python.exe -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
@@ -49,9 +50,9 @@ configured. `IBKR_TRANSMIT` defaults to false.
 
 | Symptom | Check |
 |---|---|
-| `OpenRouter is unavailable` | `OPENROUTER_API_KEY` is set and valid; network access to `openrouter.ai` works |
-| Free-model rate limit | Wait for the free quota to reset or select a funded route with `OPENROUTER_MODEL` |
-| Claude requested | Claude is not free; add credits, set a current `anthropic/...` model ID, and set `ALLOW_PAID_INFERENCE=1` |
-| Embedding failure | Confirm the configured `:free` embedding route is still present in OpenRouter's model catalog |
+| `OpenAI is unavailable` | `OPENAI_API_KEY` is set and valid; network access to `api.openai.com` works |
+| Rate limit / 429 | Wait and retry, or reduce concurrent runs; check your OpenAI usage tier |
+| Wrong model requested | Set `OPENAI_MODEL` to a model ID your account has access to |
+| Embedding failure | Confirm the configured embedding model ID is current and your key has access to it |
 | IBKR execution disabled | Set `IBKR_ENABLED=1`, paper `IBKR_ACCOUNT`, TWS port/client ID |
 | `nextValidId` timeout | Enable TWS API connections and confirm host/port/client ID |

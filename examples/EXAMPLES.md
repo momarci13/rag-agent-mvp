@@ -165,7 +165,7 @@ cat output/tasks/<task_id>/research_report.md
 
 ## Tips
 
-- First-request latency depends on the free model selected by OpenRouter.
+- First-request latency depends on the OpenAI model selected (`OPENAI_MODEL`).
 - If a task fails the critic on iteration 1, the agent retries once. Set
   `--max-iter 1` to disable revision.
 - Web-server tasks return `{status: "queued"}` immediately. The browser tracks

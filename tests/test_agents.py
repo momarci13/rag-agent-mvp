@@ -2,7 +2,7 @@
 
 import json
 
-import httpx
+import httpx2
 import pytest
 from agents.graph import _extract_code
 from agents.llm import HostedLLM, LLMConfig, ModelSpec, ModelSelectionStrategy
@@ -52,11 +52,11 @@ def test_extract_code_no_block():
 def test_model_selection():
     """Test model selection logic."""
     models = [
-        ModelSpec(name="anthropic/claude-sonnet-5", priority=1, capabilities=["reasoning"]),
-        ModelSpec(name="openrouter/free", priority=2, capabilities=["fast"]),
+        ModelSpec(name="gpt-5.1", priority=1, capabilities=["reasoning"]),
+        ModelSpec(name="gpt-5.1-mini", priority=2, capabilities=["fast"]),
     ]
     cfg = LLMConfig(
-        model="openrouter/free",
+        model="gpt-5.1-mini",
         models=models,
         selection_strategy=ModelSelectionStrategy.COMPLEXITY_BASED
     )
@@ -65,12 +65,12 @@ def test_model_selection():
     # Test simple task
     selected = llm.select_models("simple")
     assert len(selected) == 2
-    assert selected[0].name == "openrouter/free"
+    assert selected[0].name == "gpt-5.1-mini"
 
     # Test complex task
     selected = llm.select_models("complex")
     assert len(selected) == 2
-    assert selected[0].name == "anthropic/claude-sonnet-5"
+    assert selected[0].name == "gpt-5.1"
 
 
 def test_task_complexity_estimation():
@@ -83,86 +83,141 @@ def test_task_complexity_estimation():
     assert llm.estimate_task_complexity("This is a longer task with enough words to make medium complexity") == "medium"
 
 
-def test_openrouter_chat_uses_openai_contract_auth_and_attribution():
+def test_openai_chat_uses_openai_contract_and_auth():
     captured = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         captured["path"] = request.url.path
         captured["auth"] = request.headers.get("authorization")
-        captured["title"] = request.headers.get("x-title")
         captured["body"] = json.loads(request.content)
-        return httpx.Response(200, json={
+        return httpx2.Response(200, json={
             "choices": [{"message": {"content": "pong"}}],
         })
 
     llm = HostedLLM(
         LLMConfig(
-            model="openrouter/free",
-            base_url="https://openrouter.ai/api/v1",
-            api_key="sk-or-test",
-            extra_headers={"X-Title": "Quant Research RAG Agents"},
+            model="gpt-5.1-mini",
+            api_key="sk-test",
         ),
-        transport=httpx.MockTransport(handler),
+        transport=httpx2.MockTransport(handler),
     )
     assert llm.chat([{"role": "user", "content": "ping"}]) == "pong"
-    assert captured["path"] == "/api/v1/chat/completions"
-    assert captured["auth"] == "Bearer sk-or-test"
-    assert captured["title"] == "Quant Research RAG Agents"
-    assert captured["body"]["model"] == "openrouter/free"
+    assert captured["path"] == "/v1/chat/completions"
+    assert captured["auth"] == "Bearer sk-test"
+    assert captured["body"]["model"] == "gpt-5.1-mini"
 
 
-def test_openrouter_health_requires_api_key():
+def test_openai_chat_json_mode_sets_response_format():
+    captured = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx2.Response(200, json={
+            "choices": [{"message": {"content": '{"ok": true}'}}],
+        })
+
+    llm = HostedLLM(
+        LLMConfig(model="gpt-5.1-mini", api_key="sk-test"),
+        transport=httpx2.MockTransport(handler),
+    )
+    result = llm.chat_json([{"role": "user", "content": "ping"}])
+    assert result == {"ok": True}
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+
+
+def test_openai_chat_with_fallback_falls_through_tier_chain():
+    attempts = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        attempts.append(body["model"])
+        if body["model"] == "gpt-5.1":
+            return httpx2.Response(429, json={"error": {"message": "rate limited"}})
+        return httpx2.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+
+    llm = HostedLLM(
+        LLMConfig(
+            model="gpt-5.1",
+            api_key="sk-test",
+            models=[
+                ModelSpec(name="gpt-5.1", priority=1),
+                ModelSpec(name="gpt-5.1-mini", priority=2),
+            ],
+        ),
+        transport=httpx2.MockTransport(handler),
+    )
+    result = llm.chat_with_fallback([{"role": "user", "content": "ping"}])
+    assert result == "pong"
+    assert attempts == ["gpt-5.1", "gpt-5.1-mini"]
+
+
+def test_openai_health_requires_api_key():
     llm = HostedLLM(LLMConfig(api_key="", require_api_key=True))
     assert llm.health() is False
 
 
-def test_openrouter_health_validates_current_key_endpoint():
+def test_openai_health_validates_key_via_models_list():
     captured = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         captured["path"] = request.url.path
         captured["auth"] = request.headers.get("authorization")
-        return httpx.Response(200, json={"data": {"is_free_tier": True}})
+        return httpx2.Response(200, json={"object": "list", "data": []})
 
     llm = HostedLLM(
-        LLMConfig(api_key="sk-or-test"),
-        transport=httpx.MockTransport(handler),
+        LLMConfig(api_key="sk-test"),
+        transport=httpx2.MockTransport(handler),
     )
     assert llm.health() is True
-    assert captured == {"path": "/api/v1/key", "auth": "Bearer sk-or-test"}
+    assert captured["path"] == "/v1/models"
+    assert captured["auth"] == "Bearer sk-test"
 
 
-def test_default_config_uses_only_hosted_free_routes(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_EMBEDDING_MODEL", raising=False)
+def test_openai_health_returns_false_on_error():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, json={"error": {"message": "invalid key"}})
+
+    llm = HostedLLM(
+        LLMConfig(api_key="sk-bad"),
+        transport=httpx2.MockTransport(handler),
+    )
+    assert llm.health() is False
+
+
+def test_role_models_route_to_configured_model():
+    captured = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        captured["model"] = json.loads(request.content)["model"]
+        return httpx2.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    llm = HostedLLM(
+        LLMConfig(
+            model="gpt-5.1-mini",
+            api_key="sk-test",
+            role_models={"credit_validator": "gpt-5.1"},
+        ),
+        transport=httpx2.MockTransport(handler),
+    )
+    llm.chat([{"role": "user", "content": "ping"}], role="credit_validator")
+    assert captured["model"] == "gpt-5.1"
+
+
+def test_default_config_uses_openai_model_defaults(monkeypatch):
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_EMBEDDING_MODEL", raising=False)
     config = load_config()
     llm_config = make_llm_config(config)
-    assert llm_config.base_url == "https://openrouter.ai/api/v1"
-    assert llm_config.model == "openrouter/free"
-    assert set(llm_config.role_models.values()) == {"openrouter/free"}
-    assert config["rag"]["embedding_model"].endswith(":free")
+    assert llm_config.base_url is None
+    assert llm_config.model == "gpt-5.1-mini"
+    assert config["rag"]["embedding_model"] == "text-embedding-3-large"
 
 
-def test_openrouter_model_override_applies_to_every_role(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-5")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    monkeypatch.setenv("ALLOW_PAID_INFERENCE", "1")
+def test_openai_model_override_applies_to_every_role(monkeypatch):
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     config = make_llm_config(load_config())
-    assert config.model == "anthropic/claude-sonnet-5"
-    assert set(config.role_models.values()) == {"anthropic/claude-sonnet-5"}
-    assert config.models[0].name == "anthropic/claude-sonnet-5"
-
-
-def test_paid_model_override_requires_explicit_cost_gate(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-5")
-    monkeypatch.delenv("ALLOW_PAID_INFERENCE", raising=False)
-    with pytest.raises(ValueError, match="ALLOW_PAID_INFERENCE=1"):
-        make_llm_config(load_config())
-
-
-def test_paid_embedding_override_requires_explicit_cost_gate(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-small")
-    monkeypatch.delenv("ALLOW_PAID_INFERENCE", raising=False)
-    with pytest.raises(ValueError, match="ALLOW_PAID_INFERENCE=1"):
-        load_config()
+    assert config.model == "gpt-5.1"
+    assert set(config.role_models.values()) == {"gpt-5.1"}
+    assert config.models[0].name == "gpt-5.1"

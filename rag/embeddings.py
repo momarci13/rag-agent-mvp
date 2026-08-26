@@ -1,6 +1,6 @@
 """Embedding backends for retrieval.
 
-Production inference is routed through a hosted OpenAI-compatible provider.
+Production inference is routed through the direct OpenAI embeddings API.
 The deterministic hash backend exists only for unit tests and offline
 structural validation.
 """
@@ -9,10 +9,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
-import httpx
+import httpx2
 import numpy as np
+import openai
 
 
 class EmbeddingClient(Protocol):
@@ -26,7 +27,7 @@ class EmbeddingClient(Protocol):
 
 
 class HostedEmbeddings:
-    """OpenAI-compatible client for hosted embedding inference."""
+    """Direct OpenAI client for hosted embedding inference."""
 
     def __init__(
         self,
@@ -36,33 +37,30 @@ class HostedEmbeddings:
         api_key: str | None = None,
         timeout_s: int = 120,
         batch_size: int = 64,
-        provider_name: str = "OpenRouter",
+        provider_name: str = "OpenAI",
         require_api_key: bool = True,
-        health_path: str = "/key",
-        extra_headers: dict[str, str] | None = None,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx2.BaseTransport | None = None,
     ) -> None:
         self.model = model
         self.base_url = (
-            base_url
-            or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         ).rstrip("/")
         self.api_key = (
-            api_key if api_key is not None else os.getenv("OPENROUTER_API_KEY", "")
+            api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
         )
         self.timeout_s = timeout_s
         self.batch_size = max(1, batch_size)
         self.provider_name = provider_name
         self.require_api_key = require_api_key
-        self.health_path = health_path
-        self.extra_headers = dict(extra_headers or {})
-        self._client = httpx.Client(timeout=timeout_s, transport=transport)
-
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json", **self.extra_headers}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
+        http_client = httpx2.Client(timeout=timeout_s, transport=transport)
+        client_kwargs: dict[str, Any] = {
+            "api_key": self.api_key or "sk-not-configured",
+            "http_client": http_client,
+            "max_retries": 0,
+        }
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = openai.OpenAI(**client_kwargs)
 
     def encode(
         self,
@@ -79,19 +77,15 @@ class HostedEmbeddings:
         rows: list[list[float]] = []
         for start in range(0, len(values), self.batch_size):
             batch = values[start : start + self.batch_size]
-            response = self._client.post(
-                f"{self.base_url}/embeddings",
-                headers=self._headers(),
-                json={"model": self.model, "input": batch, "encoding_format": "float"},
+            response = self._client.embeddings.create(
+                model=self.model, input=batch, encoding_format="float",
             )
-            response.raise_for_status()
-            payload = response.json()
-            data = sorted(payload["data"], key=lambda item: int(item.get("index", 0)))
+            data = sorted(response.data, key=lambda item: item.index)
             if len(data) != len(batch):
                 raise ValueError(
                     f"{self.provider_name} returned an unexpected embedding count"
                 )
-            rows.extend(item["embedding"] for item in data)
+            rows.extend(item.embedding for item in data)
 
         result = np.asarray(rows, dtype=np.float32)
         if result.ndim != 2:
@@ -105,13 +99,9 @@ class HostedEmbeddings:
         if self.require_api_key and not self.api_key:
             return False
         try:
-            response = self._client.get(
-                f"{self.base_url}/{self.health_path.lstrip('/')}",
-                headers=self._headers(),
-                timeout=min(self.timeout_s, 8),
-            )
-            return response.status_code == 200
-        except httpx.HTTPError:
+            self._client.models.list()
+            return True
+        except openai.OpenAIError:
             return False
 
     def close(self) -> None:

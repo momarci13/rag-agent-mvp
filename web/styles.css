@@ -1916,6 +1916,29 @@ textarea:focus {
   gap: var(--spacing-lg);
 }
 
+.risk-disclaimer {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+  font-size: var(--font-size-sm);
+}
+
+.dark .risk-disclaimer {
+  background: #451a03;
+  color: #fcd34d;
+  border-color: #92400e;
+}
+
+.risk-downloads {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  margin-bottom: var(--spacing-sm);
+}
+
 .quant-panel h3 {
   margin-bottom: var(--spacing-md);
 }

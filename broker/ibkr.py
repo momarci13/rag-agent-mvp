@@ -6,9 +6,7 @@ short-lived one-time approval token, and only then calls the official TWS API.
 """
 from __future__ import annotations
 
-import hashlib
 import os
-import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -16,6 +14,8 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, model_validator
+
+from tools.approval import ApprovalStore
 
 
 class TradeIntent(BaseModel):
@@ -114,54 +114,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-@dataclass
-class _Approval:
-    intent_fingerprint: str
-    token_hash: str
-    expires_at: float
-    consumed: bool = False
-
-
-class ApprovalStore:
-    """In-memory, one-time, expiring approval tokens bound to exact intents."""
-
-    def __init__(self, ttl_s: int = 300) -> None:
-        self.ttl_s = ttl_s
-        self._items: dict[str, _Approval] = {}
-        self._lock = threading.Lock()
-
-    @staticmethod
-    def _fingerprint(intent: TradeIntent) -> str:
-        payload = intent.model_dump_json(exclude_none=False)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-    def issue(self, intent: TradeIntent) -> tuple[str, float]:
-        token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        expires_at = time.time() + self.ttl_s
-        with self._lock:
-            self._items[token_hash] = _Approval(
-                intent_fingerprint=self._fingerprint(intent),
-                token_hash=token_hash,
-                expires_at=expires_at,
-            )
-        return token, expires_at
-
-    def consume(self, intent: TradeIntent, token: str) -> None:
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        with self._lock:
-            approval = self._items.get(token_hash)
-            if approval is None:
-                raise PermissionError("Unknown approval token")
-            if approval.consumed:
-                raise PermissionError("Approval token was already used")
-            if time.time() > approval.expires_at:
-                raise PermissionError("Approval token expired")
-            if approval.intent_fingerprint != self._fingerprint(intent):
-                raise PermissionError("Approval token does not match this order")
-            approval.consumed = True
 
 
 class BrokerClient(Protocol):

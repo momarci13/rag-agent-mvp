@@ -1,13 +1,13 @@
 # User manual
 
-See [README.md](README.md) for installation, OpenRouter configuration, the
+See [README.md](README.md) for installation, OpenAI configuration, the
 multi-agent architecture, CLI commands, API examples, IBKR paper setup, and
 safety controls.
 
 ## Normal operating sequence
 
-1. Create a free OpenRouter API key.
-2. Export `OPENROUTER_API_KEY`.
+1. Create an OpenAI API key.
+2. Export `OPENAI_API_KEY`.
 3. Run `python run.py --healthcheck`.
 4. Ingest research material with `python run.py --ingest data/papers/`.
 5. Run `python run.py --quant-team "..."` and inspect the research, backtest,
@@ -21,18 +21,18 @@ safety controls.
 
 Only application code, Chroma vector persistence, BM25 text indexes, task
 history, backtests, and deterministic risk checks run locally. LLM and
-embedding inference run through OpenRouter-hosted providers.
+embedding inference run through the direct OpenAI API.
 
 ## Credentials
 
 Never put keys or account IDs in the repository. Supported environment values:
 
 ```text
-OPENROUTER_API_KEY
-OPENROUTER_BASE_URL
-OPENROUTER_MODEL
-OPENROUTER_EMBEDDING_MODEL
-ALLOW_PAID_INFERENCE
+OPENAI_API_KEY
+OPENAI_BASE_URL
+OPENAI_MODEL
+OPENAI_EMBEDDING_MODEL
+RISK_VALIDATION_API_TOKEN
 TRADER_API_TOKEN
 IBKR_ENABLED
 IBKR_ACCOUNT
@@ -44,10 +44,12 @@ IBKR_TRANSMIT
 ALLOW_LIVE_TRADING
 ```
 
-The OpenRouter key authorizes hosted inference. The default model routes are
-free. A paid model such as a Claude route requires both its model ID and
-`ALLOW_PAID_INFERENCE=1`, and may use account credits. IBKR credentials remain
-inside TWS/IB Gateway and are not handled by this application.
+The OpenAI key authorizes all chat and embedding inference. Every call incurs
+real, billed API cost -- there is no free tier. `OPENAI_MODEL` overrides the
+chat model for every role at once; `OPENAI_EMBEDDING_MODEL` overrides the
+embedding model (requires re-ingesting into a new Chroma collection, since
+changing models changes vector dimensionality). IBKR credentials remain inside
+TWS/IB Gateway and are not handled by this application.
 
 ## Broker controls
 

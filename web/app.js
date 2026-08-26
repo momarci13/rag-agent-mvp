@@ -10,6 +10,7 @@ const state = {
   currentTaskId: null,
   isThinking: false,
   quantRun: null,
+  riskRun: null,
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ function showSection(sectionId) {
   document.querySelectorAll('.section').forEach(sec =>
     sec.classList.toggle('active', sec.id === `${sectionId}-section`)
   );
-  const titles = { dashboard: 'Dashboard', tasks: 'Chat', quant: 'Quant Team', reports: 'Report Viewer', data: 'Data Management', settings: 'Settings' };
+  const titles = { dashboard: 'Dashboard', tasks: 'Chat', quant: 'Quant Team', 'risk-validation': 'Risk Validation', reports: 'Report Viewer', data: 'Data Management', settings: 'Settings' };
   $('pageTitle').textContent = titles[sectionId] || 'Quant Research Agents';
   state.currentSection = sectionId;
   localStorage.setItem('currentSection', sectionId);
@@ -693,6 +694,134 @@ async function executeQuantOrder() {
   }
 }
 
+// Risk validation
+
+function riskRatingBadgeClass(rating) {
+  const compliantLike = new Set(['compliant', 'low', 'not_applicable']);
+  return compliantLike.has(rating) ? 'approved' : 'rejected';
+}
+
+function renderRiskFindings(findings) {
+  if (!Array.isArray(findings) || findings.length === 0) {
+    return '<span class="muted">No findings.</span>';
+  }
+  return findings.map(f => `
+    <div class="trace-item trace-${escapeHtml(f.severity || 'unknown')}">
+      <div><strong>${escapeHtml(f.area || 'Finding')}</strong><span>${escapeHtml(f.verdict || '')} · ${escapeHtml(f.severity || '')}</span></div>
+      <p>${escapeHtml(f.description || '')}</p>
+      ${f.recommendation ? `<p class="muted">Recommendation: ${escapeHtml(f.recommendation)}</p>` : ''}
+    </div>
+  `).join('');
+}
+
+function updateRiskDownloadLinks(runId) {
+  const exts = { riskDownloadPptx: 'pptx', riskDownloadPdf: 'pdf', riskDownloadDocx: 'docx' };
+  Object.entries(exts).forEach(([id, ext]) => {
+    const link = $(id);
+    if (link) link.href = `/api/risk-validation/${encodeURIComponent(runId)}/report.${ext}`;
+  });
+}
+
+function renderRiskValidationRun(data) {
+  state.riskRun = data;
+  $('riskResult').hidden = false;
+  $('riskRunId').textContent = data.run_id || 'unknown';
+
+  const trace = Array.isArray(data.trace) ? data.trace : [];
+  $('riskTrace').innerHTML = trace.map(item => `
+    <div class="trace-item trace-${escapeHtml(item.status || 'unknown')}">
+      <div><strong>${escapeHtml(item.agent || 'agent')}</strong><span>${escapeHtml(item.status || '')}</span></div>
+      <p>${escapeHtml(item.summary || '')}</p>
+    </div>
+  `).join('') || '<span class="muted">No trace returned.</span>';
+
+  $('riskFindings').innerHTML = renderRiskFindings(data.findings);
+
+  const report = data.report || {};
+  const badge = $('riskRatingBadge');
+  badge.textContent = report.overall_rating ? report.overall_rating.replace(/_/g, ' ') : 'pending';
+  badge.className = `quant-badge ${riskRatingBadgeClass(report.overall_rating)}`;
+
+  updateRiskDownloadLinks(data.run_id);
+  $('riskApprovalStatus').textContent = report.signed_off_by
+    ? `Signed off by ${report.signed_off_by} at ${report.signed_off_at}`
+    : 'Draft only. Review the findings and downloads above, then approve to sign off.';
+}
+
+async function runRiskValidation() {
+  const domain = $('riskDomain')?.value;
+  const rawInputs = $('riskInputs')?.value.trim();
+  const apiToken = $('riskApiToken')?.value;
+  if (!rawInputs) { alert('Enter a case file (JSON) for the selected domain.'); return; }
+  if (!apiToken) { alert('Enter the RISK_VALIDATION_API_TOKEN configured on the server.'); return; }
+
+  let inputs;
+  try {
+    inputs = JSON.parse(rawInputs);
+  } catch (error) {
+    alert(`Case file is not valid JSON: ${error.message}`);
+    return;
+  }
+
+  const button = $('runRiskValidationBtn');
+  const status = $('riskRunStatus');
+  button.disabled = true;
+  button.textContent = 'Running validation...';
+  status.textContent = 'Retrieving regulatory context and running the risk-validation agent team. This may take a minute.';
+  $('riskResult').hidden = true;
+  state.riskRun = null;
+
+  try {
+    const data = await fetchJson('/api/risk-validation/run', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Risk-Token': apiToken,
+      },
+      body: JSON.stringify({ domain, inputs }),
+    });
+    renderRiskValidationRun(data);
+    status.textContent = 'Draft report ready for human validator review.';
+    addActivityItem('🏦', `Risk validation draft ready: ${(data.run_id || '').slice(0, 8)}`);
+  } catch (error) {
+    status.textContent = `Risk validation failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Run validation';
+  }
+}
+
+async function approveRiskValidation() {
+  const run = state.riskRun;
+  const apiToken = $('riskApiToken')?.value;
+  const signedOffBy = $('riskSignedOffBy')?.value.trim();
+  if (!run || !run.approval_token) { alert('Run a validation first.'); return; }
+  if (!apiToken) { alert('Enter the RISK_VALIDATION_API_TOKEN configured on the server.'); return; }
+  if (!signedOffBy) { alert('Enter the validator name signing off on this report.'); return; }
+
+  const button = $('approveRiskValidationBtn');
+  button.disabled = true;
+  $('riskApprovalStatus').textContent = 'Signing off and finalizing PPTX/PDF/DOCX...';
+  try {
+    const report = await fetchJson(`/api/risk-validation/${encodeURIComponent(run.run_id)}/approve`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Risk-Token': apiToken,
+      },
+      body: JSON.stringify({ approval_token: run.approval_token, signed_off_by: signedOffBy }),
+    });
+    run.report = report;
+    run.approval_token = null;
+    $('riskApprovalStatus').textContent = `Signed off by ${report.signed_off_by} at ${report.signed_off_at}. Final files are ready for download above.`;
+    addActivityItem('✅', `Risk validation signed off: ${(run.run_id || '').slice(0, 8)}`);
+  } catch (error) {
+    $('riskApprovalStatus').textContent = `Sign-off failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function ingestDocuments() {
   const path = $('ingestPath')?.value.trim();
   if (!path) { alert('Please enter a document path'); return; }
@@ -750,6 +879,10 @@ function setupEventListeners() {
   // Quant team
   $('runQuantBtn')?.addEventListener('click', runQuantTeam);
   $('executeQuantBtn')?.addEventListener('click', executeQuantOrder);
+
+  // Risk validation
+  $('runRiskValidationBtn')?.addEventListener('click', runRiskValidation);
+  $('approveRiskValidationBtn')?.addEventListener('click', approveRiskValidation);
 
   // Reports
   $('refreshReportsBtn')?.addEventListener('click', loadReports);

@@ -32,11 +32,15 @@ logger = logging.getLogger(__name__)
 # In-memory registry for background task progress
 _bg_tasks: dict[str, dict] = {}
 _quant_runs: dict[str, tuple[Any, Any]] = {}
+_risk_runs: dict[str, tuple[Any, Any]] = {}
+_risk_run_files: dict[str, dict[str, str]] = {}
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "configs" / "config.yaml"
 OUTPUT_RUNS = ROOT / "output" / "runs"
 OUTPUT_RUNS.mkdir(parents=True, exist_ok=True)
+OUTPUT_RISK_VALIDATION = ROOT / "output" / "risk_validation"
+OUTPUT_RISK_VALIDATION.mkdir(parents=True, exist_ok=True)
 
 # Startup: configure logging + run migration from legacy format
 async def startup_migration():
@@ -91,6 +95,16 @@ def _require_trader_auth(provided: str | None) -> None:
         raise HTTPException(401, "Invalid X-Trader-Token")
 
 
+def _require_risk_auth(provided: str | None) -> None:
+    # Deliberately a separate token/env var from trading -- these are
+    # logically separate systems with separate operators in a real bank.
+    expected = os.getenv("RISK_VALIDATION_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(503, "Risk Validation API is disabled until RISK_VALIDATION_API_TOKEN is configured")
+    if provided is None or not secrets.compare_digest(provided, expected):
+        raise HTTPException(401, "Invalid X-Risk-Token")
+
+
 def _rag(cfg: dict[str, Any]):
     try:
         from rag.hybrid import LiteHybridRAG
@@ -98,7 +112,7 @@ def _rag(cfg: dict[str, Any]):
         raise HTTPException(500, f"RAG backend unavailable: {exc}")
     return LiteHybridRAG(
         db_path=cfg["rag"]["db_path"],
-        collection=cfg["rag"].get("collection", "openrouter-free-v1"),
+        collection=cfg["rag"].get("collection", "openai-embed-v1"),
         embedding_model=cfg["rag"]["embedding_model"],
         alpha_dense=cfg["rag"]["alpha_dense"],
         query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
@@ -109,6 +123,74 @@ def _rag(cfg: dict[str, Any]):
         top_k_before_rerank=cfg["rag"]["reranking"]["top_k_before_rerank"],
         top_k_after_rerank=cfg["rag"]["reranking"]["top_k_after_rerank"],
     )
+
+
+def _regulatory_rag(cfg: dict[str, Any]):
+    """RAG instance pointed at the regulatory placeholder corpus's own
+    Chroma collection, kept separate from the quant corpus's collection."""
+    try:
+        from rag.hybrid import LiteHybridRAG
+    except Exception as exc:
+        raise HTTPException(500, f"RAG backend unavailable: {exc}")
+    reg_cfg = cfg.get("regulatory_rag", {})
+    return LiteHybridRAG(
+        db_path=cfg["rag"]["db_path"],
+        collection=reg_cfg.get("collection", "regulatory-corpus-v1"),
+        embedding_model=cfg["rag"]["embedding_model"],
+        alpha_dense=cfg["rag"]["alpha_dense"],
+        query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
+        query_expansion_method=cfg["rag"]["query_expansion"]["method"],
+        max_expansions=cfg["rag"]["query_expansion"]["max_expansions"],
+        reranking_enabled=cfg["rag"]["reranking"]["enabled"],
+        reranking_model=cfg["rag"]["reranking"]["model"],
+        top_k_before_rerank=cfg["rag"]["reranking"]["top_k_before_rerank"],
+        top_k_after_rerank=cfg["rag"]["reranking"]["top_k_after_rerank"],
+    )
+
+
+def _parse_risk_inputs(domain: str, inputs: dict[str, Any]):
+    from pydantic import ValidationError
+
+    from agents.risk_schemas import (
+        CreditModelValidationInputs,
+        ModelRiskValidationInputs,
+        NonCreditRiskValidationInputs,
+    )
+
+    schema_map = {
+        "credit_risk": CreditModelValidationInputs,
+        "non_credit_risk": NonCreditRiskValidationInputs,
+        "model_risk": ModelRiskValidationInputs,
+    }
+    schema = schema_map.get(domain)
+    if schema is None:
+        raise HTTPException(400, f"Unknown domain {domain!r}; expected one of {sorted(schema_map)}")
+    try:
+        return schema.model_validate(inputs)
+    except ValidationError as exc:
+        raise HTTPException(422, f"Invalid inputs for domain {domain}: {exc}") from exc
+
+
+def _export_risk_report(cfg: dict[str, Any], report: Any, run_id: str) -> dict[str, str]:
+    """Generate PPTX + DOCX + (best-effort) PDF for a risk-validation report,
+    overwriting any earlier draft for the same run_id."""
+    from tools.docx_report import ValidationWordReportBuilder
+    from tools.docx_to_pdf import convert_docx_to_pdf
+    from tools.pptx_report import ValidationDeckBuilder
+
+    out_dir = OUTPUT_RISK_VALIDATION / run_id
+    pptx_path = ValidationDeckBuilder().build(report, out_dir / "report.pptx")
+    docx_path = ValidationWordReportBuilder().build(report, out_dir / "report.docx")
+    pdf_engine = cfg.get("risk_validation", {}).get("pdf_via", "libreoffice")
+    pdf_path = None
+    if pdf_engine in ("libreoffice", "docx2pdf"):
+        pdf_path = convert_docx_to_pdf(docx_path, out_dir, engine=pdf_engine)
+
+    files = {"pptx": str(pptx_path), "docx": str(docx_path)}
+    if pdf_path is not None:
+        files["pdf"] = str(pdf_path)
+    _risk_run_files[run_id] = files
+    return files
 
 
 def _build_task_response(state: Any, task_id: str) -> dict[str, Any]:
@@ -295,6 +377,16 @@ class QuantExecutionRequest(BaseModel):
     approval_token: str
 
 
+class RiskValidationRequest(BaseModel):
+    domain: str  # "credit_risk" | "non_credit_risk" | "model_risk"
+    inputs: dict[str, Any]
+
+
+class RiskValidationApprovalRequest(BaseModel):
+    approval_token: str
+    signed_off_by: str
+
+
 @app.get("/", response_class=FileResponse)
 async def index():
     return ROOT / "web" / "index.html"
@@ -367,7 +459,7 @@ async def run_quant_team(
     cfg = _config()
     llm = _llm(cfg)
     if not llm.health():
-        raise HTTPException(503, "OpenRouter is unavailable or unauthorized")
+        raise HTTPException(503, "OpenAI is unavailable or unauthorized")
     rag = _rag(cfg)
     tools = make_tools(cfg)
     team = create_quant_team(cfg, llm, rag, tools["backtest"])
@@ -402,6 +494,106 @@ async def execute_quant_order(
         logger.exception("IBKR execution failed")
         raise HTTPException(502, f"IBKR execution failed: {exc}") from exc
     return receipt.model_dump(mode="json")
+
+
+@app.post("/api/risk-validation/run")
+async def run_risk_validation(
+    payload: RiskValidationRequest,
+    x_risk_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Run the bank risk-validation agent team and return a draft report.
+
+    DRAFT / SUPPORT TOOL ONLY -- the returned report is not a regulatory
+    submission. Draft PPTX/PDF/DOCX files are generated immediately so a
+    human validator can review them; see /api/risk-validation/{run_id}/approve
+    for the sign-off step required before final export.
+    """
+    from agents.risk_validation_factory import create_risk_validation_team
+
+    _require_risk_auth(x_risk_token)
+    cfg = _config()
+    llm = _llm(cfg)
+    if not llm.health():
+        raise HTTPException(503, "OpenAI is unavailable or unauthorized")
+    inputs = _parse_risk_inputs(payload.domain, payload.inputs)
+    reg_rag = _regulatory_rag(cfg)
+    team = create_risk_validation_team(cfg, llm, reg_rag)
+    try:
+        result = await asyncio.to_thread(team.run, payload.domain, inputs)
+    except Exception as exc:
+        logger.exception("Risk validation run failed")
+        raise HTTPException(500, f"Risk validation run failed: {exc}") from exc
+    _risk_runs[result.run_id] = (team, result)
+    try:
+        await asyncio.to_thread(_export_risk_report, cfg, result.report, result.run_id)
+    except Exception:
+        logger.exception("Draft report export failed for run %s", result.run_id)
+    return result.model_dump(mode="json")
+
+
+@app.post("/api/risk-validation/{run_id}/approve")
+async def approve_risk_validation(
+    run_id: str,
+    payload: RiskValidationApprovalRequest,
+    x_risk_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Consume the one-time sign-off token and finalize the report.
+
+    Regenerates PPTX/PDF/DOCX with the sign-off fields populated, overwriting
+    the draft versions. This is a workflow control, not a substitute for the
+    bank's actual four-eyes/committee sign-off process.
+    """
+    _require_risk_auth(x_risk_token)
+    item = _risk_runs.get(run_id)
+    if item is None:
+        raise HTTPException(404, "Risk validation run not found or server restarted")
+    team, result = item
+    try:
+        report = await asyncio.to_thread(team.execute, result, payload.approval_token, payload.signed_off_by)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Risk validation sign-off failed")
+        raise HTTPException(500, f"Risk validation sign-off failed: {exc}") from exc
+    cfg = _config()
+    try:
+        await asyncio.to_thread(_export_risk_report, cfg, report, run_id)
+    except Exception as exc:
+        logger.exception("Final report export failed for run %s", run_id)
+        raise HTTPException(500, f"Report signed off but export failed: {exc}") from exc
+    return report.model_dump(mode="json")
+
+
+@app.get("/api/risk-validation/{run_id}")
+async def get_risk_validation_run(run_id: str) -> dict[str, Any]:
+    item = _risk_runs.get(run_id)
+    if item is None:
+        raise HTTPException(404, "Risk validation run not found or server restarted")
+    _, result = item
+    return result.model_dump(mode="json")
+
+
+@app.get("/api/risk-validation/{run_id}/report.{ext}", response_class=FileResponse)
+async def get_risk_validation_report(run_id: str, ext: str):
+    if ext not in ("pptx", "pdf", "docx"):
+        raise HTTPException(400, "Unsupported report format; use pptx, pdf, or docx")
+    files = _risk_run_files.get(run_id)
+    if not files or ext not in files or not Path(files[ext]).exists():
+        detail = (
+            f"{ext.upper()} not available for this run (LibreOffice/docx2pdf "
+            "may not be installed, or the run has not completed)"
+            if ext == "pdf"
+            else f"{ext.upper()} not found for this run"
+        )
+        raise HTTPException(404, detail)
+    media_types = {
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pdf": "application/pdf",
+    }
+    return FileResponse(
+        files[ext], media_type=media_types[ext], filename=f"risk_validation_{run_id[:8]}.{ext}",
+    )
 
 
 @app.get("/api/reports/{task_id}/pdf", response_class=FileResponse)
@@ -538,7 +730,7 @@ async def ingest(payload: IngestRequest) -> dict[str, Any]:
 
     rag = LiteHybridRAG(
         db_path=cfg["rag"]["db_path"],
-        collection=cfg["rag"].get("collection", "openrouter-free-v1"),
+        collection=cfg["rag"].get("collection", "openai-embed-v1"),
         embedding_model=cfg["rag"]["embedding_model"],
         alpha_dense=cfg["rag"]["alpha_dense"],
         query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],

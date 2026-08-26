@@ -32,6 +32,10 @@
         <span class="nav-icon">🧠</span>
         <span class="nav-text">Quant Team</span>
       </a>
+      <a href="#risk-validation" class="nav-item" data-section="risk-validation">
+        <span class="nav-icon">🏦</span>
+        <span class="nav-text">Risk Validation</span>
+      </a>
       <a href="#reports" class="nav-item" data-section="reports">
         <span class="nav-icon">📄</span>
         <span class="nav-text">Reports</span>
@@ -208,6 +212,79 @@
               <div id="quantRisk"></div>
               <button id="executeQuantBtn" class="btn-danger" hidden>Approve exact paper order</button>
               <div id="quantExecutionStatus" class="quant-execution-status"></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Risk Validation Section -->
+      <section id="risk-validation-section" class="section">
+        <div class="section-header">
+          <h2>Bank Risk Validation Agent Team</h2>
+          <p>Credit / non-credit / model risk validation — DRAFT reports for human validator review, not a regulatory submission</p>
+        </div>
+
+        <div class="quant-run-card">
+          <div class="risk-disclaimer">
+            ⚠️ Draft-and-support tool only. Regulatory references and thresholds are placeholder/illustrative
+            and have not been verified against ECB/EBA/MNB source documents. Nothing here may be submitted
+            to a regulator without human validator sign-off.
+          </div>
+
+          <label for="riskDomain">Validation domain</label>
+          <select id="riskDomain">
+            <option value="credit_risk">Credit risk</option>
+            <option value="non_credit_risk">Non-credit risk (market / operational / liquidity)</option>
+            <option value="model_risk">Model risk</option>
+          </select>
+
+          <label for="riskInputs">Case file (JSON, matching the selected domain's schema)</label>
+          <textarea id="riskInputs" rows="10" placeholder='{"model_id":"PD-RETAIL-01","model_type":"PD","exposure_class":"retail","portfolio_segment":"mortgages","estimation_approach":"internal_ratings_based","population_stability_index":0.3,"gini_coefficient":0.35,"backtesting_exceptions_count":10,"backtesting_observations_count":100,"override_rate_pct":0.15}'></textarea>
+
+          <div class="quant-auth-row">
+            <div>
+              <label for="riskApiToken">Risk Validation API token</label>
+              <input id="riskApiToken" type="password" autocomplete="off" placeholder="RISK_VALIDATION_API_TOKEN" />
+              <small>Used for this request only; it is not saved by the browser.</small>
+            </div>
+            <button id="runRiskValidationBtn" class="btn-primary">Run validation</button>
+          </div>
+          <div id="riskRunStatus" class="quant-status">Ready. Produces a draft report only.</div>
+        </div>
+
+        <div id="riskResult" class="quant-result" hidden>
+          <div class="quant-result-header">
+            <div>
+              <span class="quant-label">Run</span>
+              <strong id="riskRunId"></strong>
+            </div>
+            <span id="riskRatingBadge" class="quant-badge"></span>
+          </div>
+
+          <div class="quant-grid">
+            <article class="quant-panel">
+              <h3>Agent trace</h3>
+              <div id="riskTrace" class="agent-trace"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Findings</h3>
+              <div id="riskFindings"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Draft downloads</h3>
+              <div class="risk-downloads">
+                <a id="riskDownloadPptx" class="btn-secondary" href="#" target="_blank">PPTX</a>
+                <a id="riskDownloadPdf" class="btn-secondary" href="#" target="_blank">PDF</a>
+                <a id="riskDownloadDocx" class="btn-secondary" href="#" target="_blank">DOCX</a>
+              </div>
+              <small>Draft downloads are watermarked "DRAFT" and carry no sign-off until approved below.</small>
+            </article>
+            <article class="quant-panel">
+              <h3>Approve & sign off</h3>
+              <label for="riskSignedOffBy">Validator name</label>
+              <input id="riskSignedOffBy" type="text" placeholder="Jane Validator" />
+              <button id="approveRiskValidationBtn" class="btn-danger">Approve & sign off</button>
+              <div id="riskApprovalStatus" class="quant-execution-status"></div>
             </article>
           </div>
         </div>

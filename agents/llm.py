@@ -1,8 +1,13 @@
-"""Provider-neutral hosted LLM client using an OpenAI-compatible API.
+"""Direct OpenAI API client used by every agent role.
 
-The default endpoint is OpenRouter's fully hosted free-model router. The
-application never loads or runs a local language model. Agent specialisation
-is expressed through role prompts and optional per-role hosted model routes.
+The application talks to OpenAI's hosted Chat Completions API. It never loads
+or runs a local language model. Agent specialisation is expressed through
+role prompts and optional per-role model routes (``role_models``).
+
+DRAFT/SUPPORT NOTE: this client underlies the bank risk-validation agent team
+as well as the pre-existing quant/research agents. Nothing here should be
+read as making any agent's output authoritative -- see agents/risk_schemas.py
+for the disclaimer baked into every validation report.
 """
 from __future__ import annotations
 
@@ -12,11 +17,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-import httpx
+import httpx2
+import openai
 
 
 class ModelSelectionStrategy(Enum):
-    """How configured hosted model routes are ordered."""
+    """How configured model routes are ordered."""
 
     PRIORITY = "priority"
     COMPLEXITY_BASED = "complexity_based"
@@ -25,7 +31,7 @@ class ModelSelectionStrategy(Enum):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """A model route exposed by the configured hosted provider."""
+    """A model route exposed by OpenAI (e.g. a reasoning vs. fast tier)."""
 
     name: str
     priority: int = 1
@@ -36,12 +42,11 @@ class ModelSpec:
 class LLMConfig:
     """Configuration for :class:`HostedLLM`."""
 
-    model: str = "openrouter/free"
-    base_url: str = "https://openrouter.ai/api/v1"
+    model: str = "gpt-5.1-mini"
+    base_url: str | None = None
     api_key: str = ""
-    provider_name: str = "OpenRouter"
+    provider_name: str = "OpenAI"
     require_api_key: bool = True
-    health_path: str = "/key"
     temperature: float = 0.2
     timeout_s: int = 180
     max_output_tokens: int = 8192
@@ -49,25 +54,38 @@ class LLMConfig:
     selection_strategy: ModelSelectionStrategy = ModelSelectionStrategy.PRIORITY
     fallback_timeout_s: int = 90
     role_models: dict[str, str] = field(default_factory=dict)
-    extra_headers: dict[str, str] = field(default_factory=dict)
 
 
 class HostedLLM:
-    """Small, synchronous OpenAI-compatible hosted-inference client.
+    """Small, synchronous OpenAI client shared by every agent role.
 
-    The class intentionally exposes the same ``chat`` and ``chat_json`` shape
-    used by the agents, keeping every role independent of a provider SDK.
+    Exposes the same ``chat``/``chat_json``/``chat_with_fallback`` shape the
+    agents already depend on, keeping every role independent of the raw
+    OpenAI SDK. ``transport`` accepts an ``httpx2.BaseTransport`` (the OpenAI
+    SDK's own HTTP stack) purely to let tests inject a mock transport with no
+    live network calls.
     """
 
     def __init__(
         self,
         cfg: LLMConfig,
         *,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx2.BaseTransport | None = None,
     ) -> None:
         self.cfg = cfg
-        self.base_url = cfg.base_url.rstrip("/")
-        self._client = httpx.Client(timeout=cfg.timeout_s, transport=transport)
+        self.base_url = (cfg.base_url or "https://api.openai.com/v1").rstrip("/")
+        http_client = httpx2.Client(timeout=cfg.timeout_s, transport=transport)
+        client_kwargs: dict[str, Any] = {
+            "api_key": cfg.api_key or "sk-not-configured",
+            "http_client": http_client,
+            # Retries/fallback are handled explicitly by chat_with_fallback and
+            # chat_json's bounded retry loop; disable the SDK's own automatic
+            # retries so each attempt maps to exactly one HTTP request.
+            "max_retries": 0,
+        }
+        if cfg.base_url:
+            client_kwargs["base_url"] = cfg.base_url
+        self._client = openai.OpenAI(**client_kwargs)
         if not cfg.models:
             cfg.models = [ModelSpec(name=cfg.model, priority=1)]
 
@@ -80,16 +98,10 @@ class HostedLLM:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json", **self.cfg.extra_headers}
-        if self.cfg.api_key:
-            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
-        return headers
-
     def select_models(self, task_complexity: str = "medium") -> list[ModelSpec]:
-        """Return the ordered hosted-model fallback chain.
+        """Return the ordered model fallback chain.
 
-        Priority is deterministic.  For ``complexity_based`` routing, simple
+        Priority is deterministic. For ``complexity_based`` routing, simple
         tasks prefer routes tagged ``fast`` and complex tasks prefer routes
         tagged ``reasoning``; configured priority resolves remaining ties.
         """
@@ -123,7 +135,7 @@ class HostedLLM:
         stop: list[str] | None = None,
         role: str | None = None,
     ) -> str:
-        """Call the preferred route and fail over through configured routes."""
+        """Call the preferred model and fail over through configured routes."""
 
         role_model = self._model_for_role(role)
         chain = [ModelSpec(role_model, priority=0)] if role_model else []
@@ -141,7 +153,7 @@ class HostedLLM:
                     model=model_spec.name,
                     timeout_s=timeout,
                 )
-            except (httpx.HTTPError, KeyError, ValueError) as exc:
+            except (openai.OpenAIError, KeyError, ValueError) as exc:
                 last_error = exc
 
         raise RuntimeError(
@@ -159,30 +171,23 @@ class HostedLLM:
         role: str | None = None,
         timeout_s: int | None = None,
     ) -> str:
-        """Send one non-streaming hosted chat-completions request."""
+        """Send one non-streaming chat-completions request."""
 
         selected_model = model or self._model_for_role(role) or self.cfg.model
-        payload: dict[str, Any] = {
+        request_kwargs: dict[str, Any] = {
             "model": selected_model,
             "messages": messages,
-            "stream": False,
             "temperature": self.cfg.temperature if temperature is None else temperature,
             "max_tokens": self.cfg.max_output_tokens,
+            "timeout": timeout_s or self.cfg.timeout_s,
         }
         if stop:
-            payload["stop"] = stop
+            request_kwargs["stop"] = stop
         if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+            request_kwargs["response_format"] = {"type": "json_object"}
 
-        response = self._client.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json=payload,
-            timeout=timeout_s or self.cfg.timeout_s,
-        )
-        response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
+        response = self._client.chat.completions.create(**request_kwargs)
+        content = response.choices[0].message.content
         if not isinstance(content, str):
             raise ValueError(
                 f"{self.cfg.provider_name} response did not contain text content"
@@ -228,7 +233,7 @@ class HostedLLM:
                 if not isinstance(parsed, dict):
                     raise ValueError("Expected a JSON object")
                 return parsed
-            except (json.JSONDecodeError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+            except (json.JSONDecodeError, openai.OpenAIError, RuntimeError, ValueError) as exc:
                 last_error = exc
                 time.sleep(0.25 * (attempt + 1))
         raise RuntimeError(
@@ -237,18 +242,14 @@ class HostedLLM:
         )
 
     def health(self) -> bool:
-        """Return whether the hosted models endpoint is reachable and authorized."""
+        """Return whether the OpenAI API is reachable and the key is authorized."""
 
         if self.cfg.require_api_key and not self.cfg.api_key:
             return False
         try:
-            response = self._client.get(
-                f"{self.base_url}/{self.cfg.health_path.lstrip('/')}",
-                headers=self._headers(),
-                timeout=min(8, self.cfg.timeout_s),
-            )
-            return response.status_code == 200
-        except httpx.HTTPError:
+            self._client.models.list()
+            return True
+        except openai.OpenAIError:
             return False
 
     @staticmethod

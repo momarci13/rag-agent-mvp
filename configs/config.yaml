@@ -1,33 +1,39 @@
-# Quant Research Agent configuration
+# Quant Research + Risk Validation Agent configuration
 # ---------------------------------------------------------------
-# All model inference is hosted through OpenRouter. No local LLM or embedding
-# model is loaded by the application.
+# All model inference is hosted through the direct OpenAI API. No local LLM
+# or embedding model is loaded by the application. Every call incurs real
+# OpenAI API cost -- there is no "free tier" route.
 
 llm:
-  # OPENROUTER_* environment variables override these non-secret values.
-  # Non-free model routes also require ALLOW_PAID_INFERENCE=1.
-  provider_name: "OpenRouter"
-  base_url: "https://openrouter.ai/api/v1"
+  # OPENAI_* environment variables (OPENAI_API_KEY, OPENAI_MODEL,
+  # OPENAI_BASE_URL) override these non-secret values.
+  provider_name: "OpenAI"
+  # base_url is left unset so the SDK talks to https://api.openai.com/v1.
+  # Set OPENAI_BASE_URL to point at an Azure/OpenAI-compatible proxy instead.
   require_api_key: true
-  health_path: "/key"
-  model: "openrouter/free"
+  # CONFIRM EXACT MODEL IDS AT BUILD TIME -- placeholder names only.
+  model: "gpt-5.1-mini"
   models:
-    - name: "openrouter/free"
+    - name: "gpt-5.1-mini"
       priority: 1
-      capabilities: ["reasoning", "quant", "research", "fast"]
+      capabilities: ["fast"]
+    - name: "gpt-5.1"
+      priority: 2
+      capabilities: ["reasoning", "quant", "research"]
   selection_strategy: "priority"
   role_models:
-    planner: "openrouter/free"
-    research: "openrouter/free"
-    quant: "openrouter/free"
-    model: "openrouter/free"
-    risk: "openrouter/free"
-    trader: "openrouter/free"
-    writer: "openrouter/free"
-    narrator: "openrouter/free"
-  extra_headers:
-    HTTP-Referer: "https://github.com/momarci13/rag-agent-mvp"
-    X-Title: "Quant Research RAG Agents"
+    planner: "gpt-5.1-mini"
+    research: "gpt-5.1"
+    quant: "gpt-5.1"
+    model: "gpt-5.1"
+    risk: "gpt-5.1-mini"
+    trader: "gpt-5.1-mini"
+    writer: "gpt-5.1-mini"
+    narrator: "gpt-5.1-mini"
+    credit_validator: "gpt-5.1"
+    noncredit_validator: "gpt-5.1"
+    model_validator: "gpt-5.1"
+    report_writer: "gpt-5.1-mini"
   temperature: 0.2
   timeout_s: 240
   fallback_timeout_s: 90
@@ -35,9 +41,11 @@ llm:
 
 rag:
   db_path: "./kb/chroma"
-  # Separate collection avoids dimension conflicts with older embedding indexes.
-  collection: "openrouter-free-v1"
-  embedding_model: "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+  # Separate collection avoids dimension conflicts with older embedding indexes
+  # (switching embedding providers/models changes vector dimensionality).
+  collection: "openai-embed-v1"
+  # CONFIRM EXACT MODEL ID AT BUILD TIME -- placeholder name only.
+  embedding_model: "text-embedding-3-large"
   chunk_tokens: 256
   chunk_overlap: 32
   alpha_dense: 0.6          # hybrid weight: dense vs BM25
@@ -99,6 +107,41 @@ quant_team:
     min_deflated_sharpe: 0.50
     max_drawdown: 0.25
     max_var_99: 0.05
+
+risk_validation:
+  # Bank Risk Validation Department agent team (credit / non-credit / model
+  # risk). DRAFT/SUPPORT TOOL ONLY -- see agents/risk_schemas.py's module
+  # docstring. All thresholds below are illustrative placeholders and must be
+  # replaced with the bank's actual validation-policy-owned limits before any
+  # real use.
+  credit_risk:
+    max_psi: 0.25
+    min_gini: 0.40
+    max_backtesting_exception_rate: 0.05   # exceptions / observations
+    max_override_rate_pct: 0.10
+  non_credit_risk:
+    market:
+      max_var_backtesting_exceptions_250d: 4       # Basel traffic-light green/yellow boundary, illustrative
+      max_var_backtesting_exceptions_red_250d: 9
+    operational:
+      material_loss_threshold_amount: 100000
+    liquidity:
+      min_lcr_pct: 100.0
+      min_nsfr_pct: 100.0
+  model_risk:
+    max_psi: 0.25
+    min_gini: 0.40
+    tier_1_revalidation_days: 365
+    tier_2_revalidation_days: 730
+    tier_3_revalidation_days: 1095
+  approval_token_ttl_s: 1800   # sign-off tokens live 30 min
+  pdf_via: "libreoffice"       # "libreoffice" | "docx2pdf" | "latex"
+
+regulatory_rag:
+  # Separate collection from the quant corpus so the two domains don't
+  # pollute each other's retrieval.
+  collection: "regulatory-corpus-v1"
+  corpus_dir: "data/regulatory"
 
 writing:
   latex_engine: "pdflatex"  # or "pdflatex"; tectonic is a single binary

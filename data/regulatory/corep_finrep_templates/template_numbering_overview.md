@@ -35,6 +35,18 @@ regulatory return the underlying model/process feeds, not a specific,
 verified template cell reference, unless a real template mapping has been
 ingested to replace this placeholder.
 
+## Current instrument
+
+Supervisory reporting for EU institutions is set out in the EBA
+**Implementing Technical Standards on supervisory reporting**, given legal
+force by **Commission Implementing Regulation (EU) 2021/451** (as amended),
+with the reporting content defined by the EBA reporting framework's
+technical package: the instructions, the validation rules, and the **Data
+Point Model (DPM)** / XBRL taxonomy. Template codes, rows and columns
+change between framework releases, so any `template_code` / `row` / `column`
+citation this system emits is a structural pointer only until the real
+technical package has been ingested.
+
 ## Replacing this placeholder
 
 Ingest the current EBA reporting framework's technical package

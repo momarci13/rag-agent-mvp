@@ -1,60 +1,61 @@
-# EBA GL 2017/11-style internal model validation -- representative structure
+# EBA/GL/2017/11-style definition of default -- representative structure
 
 > **PLACEHOLDER / NOT VERBATIM.** This is a hand-authored summary of the
-> *kind* of heading structure a bank's internal ratings-based (IRB) model
-> validation guideline commonly follows, written from general public
-> knowledge of the EBA Guidelines on PD/LGD estimation and the treatment of
-> defaulted exposures. It is not a reproduction of the actual EBA/GL/2017/11
-> text and must not be cited as such. Replace this file with the real
-> guideline text (or a licensed summary you are permitted to ingest) before
-> relying on it for anything beyond structural drafting scaffolding.
+> *kind* of structure the EBA Guidelines on the application of the
+> definition of default under Article 178 of Regulation (EU) No 575/2013
+> (CRR) commonly follow, written from general public knowledge. It is not a
+> reproduction of the actual EBA/GL/2017/11 text and must not be cited as
+> such. Replace this file with the real guideline text (or a licensed
+> summary you are permitted to ingest) before relying on it for anything
+> beyond structural drafting scaffolding.
+>
+> **Scope correction vs. earlier drafts of this corpus:** EBA/GL/2017/11 is
+> the *definition of default* guideline. The estimation of PD, LGD and the
+> treatment of defaulted exposures is a **separate** instrument,
+> **EBA/GL/2017/16** (see `../eba_gl_2017_16_pd_lgd/`). Downturn LGD
+> estimation is **EBA/GL/2019/03** (see `../eba_gl_2019_03_downturn_lgd/`).
 
-## 1. Scope and applicable models
+## 1. Scope
 
-Internal model validation guidance of this kind typically applies to
-models used to estimate:
+Guidance of this kind harmonises how an institution identifies that a
+default of an obligor (or, for retail, a credit facility) has occurred for
+the purposes of the IRB and standardised approaches.
 
-- Probability of Default (PD)
-- Loss Given Default (LGD)
-- Exposure at Default (EAD) / Credit Conversion Factors (CCF)
-- IFRS 9 Expected Credit Loss (ECL) models that reuse IRB risk parameters
+## 2. Elements commonly addressed
 
-## 2. Independent validation function
+1. **Days past due criterion** -- default is deemed to have occurred when a
+   material credit obligation is more than 90 days past due; the counting of
+   days past due and technical-past-due situations are defined.
+2. **Materiality threshold** -- an absolute component and a relative
+   component (share of the total on-balance-sheet exposure), consistent with
+   the applicable regulatory technical standard.
+3. **Unlikeliness-to-pay (UTP) indicators** -- non-accrued status, specific
+   credit risk adjustments, sale of the credit obligation at a material
+   credit-related economic loss, distressed restructuring, bankruptcy or
+   similar protection.
+4. **Distressed restructuring / forbearance** -- when a forbearance measure
+   is treated as a UTP trigger (e.g. a diminished financial obligation above
+   a threshold).
+5. **Level of application** -- obligor level for non-retail; facility level
+   permitted for retail.
+6. **Return to non-default status** -- a minimum probation period before a
+   previously defaulted exposure is reclassified as performing, and stricter
+   treatment for exposures that were subject to distressed restructuring.
+7. **Contagion / pulling effect** -- when default on one exposure triggers
+   default on other exposures of the same obligor or connected clients.
+8. **Consistency of use** -- the same definition is used across internal risk
+   management, IRB estimation, and, where relevant, IFRS 9 staging.
 
-A validation function independent of model development is expected to
-perform, at minimum on an annual basis for material models:
+## 3. Why this matters for validation
 
-1. **Conceptual soundness review** -- methodology, assumptions, and risk
-   driver selection are reviewed for theoretical and empirical
-   justification.
-2. **Data quality assessment** -- completeness, accuracy, and
-   representativeness of the data used to build and apply the model.
-3. **Discriminatory power assessment** -- e.g. Gini coefficient / AUC,
-   Kolmogorov-Smirnov statistic, compared against internal minimum
-   thresholds and prior validation cycles.
-4. **Calibration and back-testing** -- comparison of predicted vs. realised
-   default/loss rates, including a Population Stability Index (PSI) check
-   for input population drift, and a binomial or similar test for
-   calibration accuracy with a defined exception-rate tolerance.
-5. **Override analysis** -- review of the rate and pattern of manual
-   overrides to automated ratings/scores, looking for systematic bias.
-6. **IT implementation review** -- confirmation the deployed scoring engine
-   matches the validated model specification.
-7. **Use test** -- evidence the model is genuinely used in credit decision
-   and risk management processes, not solely for regulatory reporting.
-8. **Ongoing monitoring** -- a defined monitoring plan with escalation
-   triggers between full validation cycles.
-
-## 3. Illustrative severity/verdict conventions
-
-A validation finding for each area above is commonly rated on a scale such
-as: compliant / partially compliant / non-compliant / not applicable, with
-a severity (critical/high/medium/low/observation) reflecting the potential
-prudential impact and urgency of remediation.
+A validation review confirms the default definition is implemented
+consistently across data, estimation and reporting, that the materiality
+threshold and probation periods match the approved policy, and that any
+change to the definition is treated as a model change (see
+`../model_change_529_2014/`).
 
 ## 4. Illustrative citation format used by this system
 
-`regulatory_reference` fields produced by the credit risk validation agent
-use a placeholder citation style such as `"EBA/GL/2017/11 Title IV, para
-NN"` purely to indicate *which structural area* a finding maps to. These
-paragraph numbers are illustrative placeholders, not verified citations.
+`regulatory_reference` strings such as `"EBA/GL/2017/11"` indicate that a
+finding concerns the *definition of default*; paragraph numbers, where
+shown, are illustrative placeholders, not verified citations.

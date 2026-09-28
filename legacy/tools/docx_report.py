@@ -7,20 +7,31 @@ must not drift from tools/pptx_report.py's deck.
 """
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 
 from agents.risk_schemas import ValidationReport
+from tools.pptx_report import _shared_numeric_trend_series
+from tools.report_charts import render_metric_chart
 
 DISCLAIMER_BANNER = "DRAFT -- NOT A REGULATORY SUBMISSION"
+
+_MAX_TREND_CHARTS = 3
 
 
 class ValidationWordReportBuilder:
     """Builds a draft Word validation report from a ValidationReport."""
 
-    def build(self, report: ValidationReport, output_path: str | Path) -> Path:
+    def build(
+        self,
+        report: ValidationReport,
+        output_path: str | Path,
+        *,
+        history: list[ValidationReport] | None = None,
+    ) -> Path:
         doc = Document()
 
         banner = doc.add_paragraph()
@@ -40,6 +51,45 @@ class ValidationWordReportBuilder:
 
         doc.add_heading("Executive Summary", level=1)
         doc.add_paragraph(report.overall_conclusion or "(pending)")
+
+        if report.recommendation and report.recommendation != "not_a_recommendation":
+            doc.add_heading("Recommendation & Conditions", level=1)
+            rec_p = doc.add_paragraph()
+            rec_run = rec_p.add_run(f"Recommendation: {report.recommendation.replace('_', ' ').upper()}")
+            rec_run.bold = True
+            for cond in report.conditions:
+                doc.add_paragraph(cond, style="List Bullet")
+            doc.add_paragraph(
+                "This recommendation is derived deterministically from the overall rating and the "
+                "deterministic gate result. It is a drafting aid, not a supervisory decision."
+            )
+
+        if report.follow_up_on_prior_findings:
+            doc.add_heading("Follow-up on Prior Findings", level=1)
+            table = doc.add_table(rows=1, cols=4)
+            table.style = "Light Grid Accent 1"
+            hdr = table.rows[0].cells
+            for i, header in enumerate(["Reference", "Area", "Status", "Note"]):
+                hdr[i].text = header
+            for pf in report.follow_up_on_prior_findings:
+                row = table.add_row().cells
+                row[0].text = pf.finding_reference
+                row[1].text = pf.area
+                row[2].text = pf.status
+                row[3].text = pf.note
+
+        if report.validation_sample or report.materiality_rationale or report.deviations_from_policy:
+            doc.add_heading("Validation Sample & Materiality", level=1)
+            if report.validation_sample:
+                doc.add_heading("Validation sample", level=2)
+                doc.add_paragraph(report.validation_sample)
+            if report.materiality_rationale:
+                doc.add_heading("Materiality rationale", level=2)
+                doc.add_paragraph(report.materiality_rationale)
+            if report.deviations_from_policy:
+                doc.add_heading("Deviations from policy", level=2)
+                for dev in report.deviations_from_policy:
+                    doc.add_paragraph(dev, style="List Bullet")
 
         doc.add_heading("Scope & Methodology", level=1)
         doc.add_heading("Scope", level=2)
@@ -97,8 +147,42 @@ class ValidationWordReportBuilder:
             for key, value in report.quantitative_results.items():
                 row = table.add_row().cells
                 row[0].text, row[1].text = str(key), str(value)
+            numeric_results = {
+                k: v for k, v in report.quantitative_results.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            }
+            if numeric_results:
+                chart_bytes = render_metric_chart(numeric_results, "Current Metrics")
+                doc.add_picture(io.BytesIO(chart_bytes), width=Inches(6.0))
         else:
             doc.add_paragraph("No quantitative results were supplied.")
+
+        if history:
+            series_by_key = _shared_numeric_trend_series(report.quantitative_results, history)
+            if series_by_key:
+                doc.add_heading("Metric Trends", level=1)
+                for key, series in list(series_by_key.items())[:_MAX_TREND_CHARTS]:
+                    doc.add_heading(key, level=2)
+                    labeled = {f"cycle {i + 1}": value for i, value in enumerate(series)}
+                    chart_bytes = render_metric_chart(labeled, f"{key} across validation cycles")
+                    doc.add_picture(io.BytesIO(chart_bytes), width=Inches(6.0))
+
+        doc.add_heading("Reviewer Notes", level=1)
+        doc.add_paragraph(
+            "Space for the human validator to add remarks per finding before sign-off. "
+            "This is a plain editable Word table cell, not a native Word comment."
+        )
+        if report.findings:
+            table = doc.add_table(rows=1, cols=2)
+            table.style = "Light Grid Accent 1"
+            hdr = table.rows[0].cells
+            hdr[0].text, hdr[1].text = "Finding", "Reviewer note"
+            for f in report.findings:
+                row = table.add_row().cells
+                row[0].text = f"[{f.severity}] {f.area}: {f.description[:120]}"
+                row[1].text = ""  # intentionally empty -- editable by the validator
+        else:
+            doc.add_paragraph("No findings to annotate.")
 
         doc.add_heading("Recommendations & Remediation Plan", level=1)
         actionable = [f for f in report.findings if f.recommendation]
@@ -125,10 +209,15 @@ class ValidationWordReportBuilder:
 
         doc.add_heading("Sign-off", level=1)
         doc.add_paragraph(f"Prepared by: {report.prepared_by}")
-        doc.add_paragraph(
-            f"Signed off by: {report.signed_off_by or 'PENDING -- human validator sign-off required'}"
-        )
-        doc.add_paragraph(f"Signed off at: {report.signed_off_at or 'n/a'}")
+        if report.preparer:
+            doc.add_paragraph(f"Case file prepared by: {report.preparer} (may not sign off this report)")
+        doc.add_paragraph(f"Required sign-offs: {report.required_signoffs}")
+        if report.signoffs:
+            for signoff in report.signoffs:
+                role_suffix = f" ({signoff.role})" if signoff.role else ""
+                doc.add_paragraph(f"Signed off by {signoff.by}{role_suffix} at {signoff.at}", style="List Bullet")
+        else:
+            doc.add_paragraph("PENDING -- human validator sign-off required.")
         disclaimer_p = doc.add_paragraph()
         disclaimer_run = disclaimer_p.add_run(report.disclaimer)
         disclaimer_run.italic = True

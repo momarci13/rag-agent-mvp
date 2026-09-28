@@ -1,11 +1,2 @@
-from .multifidelity_kan import (
-    ResidualKAN,
-    evaluate_regression,
-    generate_multifidelity_dataset,
-)
-
-__all__ = [
-    "ResidualKAN",
-    "evaluate_regression",
-    "generate_multifidelity_dataset",
-]
+"""Numerical helpers available to agent-generated model code (statistical
+tests, risk metrics, backtesting) and PDF conversion for reports."""

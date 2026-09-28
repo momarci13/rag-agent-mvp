@@ -1,0 +1,59 @@
+[
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Credit Risk Validation Report -- PD-RETAIL-01",
+    "Entity under review: PD-RETAIL-01 (mortgages)\nReporting period: 2026Q2\nDomain: Credit Risk\nGenerated: 2026-01-01T00:00:00+00:00\nPrepared by: AI Risk Validation Agent (draft)"
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Executive Summary",
+    "Critical PSI breach requires recalibration."
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Scope & Methodology",
+    "Scope:\nScope text\n\nMethodology:\nMethodology text"
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Model / Exposure Overview",
+    "Entity under review: PD-RETAIL-01 (mortgages)\nReporting period: 2026Q2\nDomain: Credit Risk\n\nCase file summary (as submitted):\n  - psi: 0.3\n  - gini: 0.35\n"
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Validation Activities Checklist",
+    "Area | Verdict",
+    "Calibration and back-testing | non_compliant"
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Findings & Severity Ratings",
+    "Area | Verdict | Severity | Description",
+    "Calibration and back-testing | non_compliant | critical | PSI breach detected in the retail PD model case file."
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Quantitative Test Results",
+    "Metric | Value",
+    "psi | 0.3",
+    "gini | 0.35"
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Recommendations & Remediation Plan",
+    "Recommendation | Owner | Deadline (days)",
+    "Recalibrate the model and reassess quarterly. | Model Owner | 30"
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Overall Validation Conclusion",
+    "Overall rating: NON_COMPLIANT",
+    "Critical PSI breach requires recalibration."
+  ],
+  [
+    "DRAFT -- NOT A REGULATORY SUBMISSION",
+    "Sign-off",
+    "Prepared by: AI Risk Validation Agent (draft)\nRequired sign-offs: 1\nPENDING -- human validator sign-off required",
+    "DRAFT -- For internal validation review only, not a regulatory submission. This report was produced by an AI-assisted drafting tool. Regulatory references and thresholds are placeholder/illustrative and have not been verified against source ECB/EBA/MNB documents. It must be reviewed and signed off by a qualified human risk validator before any internal or external use."
+  ]
+]

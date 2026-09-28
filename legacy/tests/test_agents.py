@@ -5,7 +5,7 @@ import json
 import httpx2
 import pytest
 from agents.graph import _extract_code
-from agents.llm import HostedLLM, LLMConfig, ModelSpec, ModelSelectionStrategy
+from agents.llm import HostedLLM, LLMConfig, ModelSpec, ModelSelectionStrategy, make_strict_json_schema
 from run import load_config, make_llm_config
 
 
@@ -212,6 +212,69 @@ def test_default_config_uses_openai_model_defaults(monkeypatch):
     assert llm_config.base_url is None
     assert llm_config.model == "gpt-5.1-mini"
     assert config["rag"]["embedding_model"] == "text-embedding-3-large"
+
+
+def test_make_strict_json_schema_sets_additional_properties_false_and_full_required():
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None},
+        },
+    }
+    strict = make_strict_json_schema(schema)
+    assert strict["additionalProperties"] is False
+    assert set(strict["required"]) == {"a", "b"}
+
+
+def test_make_strict_json_schema_recurses_into_defs_and_items():
+    schema = {
+        "$defs": {
+            "Inner": {"type": "object", "properties": {"x": {"type": "string"}}},
+        },
+        "type": "object",
+        "properties": {
+            "items": {"type": "array", "items": {"$ref": "#/$defs/Inner"}},
+        },
+    }
+    strict = make_strict_json_schema(schema)
+    assert strict["$defs"]["Inner"]["additionalProperties"] is False
+    assert strict["$defs"]["Inner"]["required"] == ["x"]
+
+
+def test_chat_json_strict_mode_sends_json_schema_response_format():
+    captured = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx2.Response(200, json={
+            "choices": [{"message": {"content": json.dumps({"ok": True})}}],
+        })
+
+    llm = HostedLLM(LLMConfig(model="gpt-5.1-mini", api_key="sk-test"), transport=httpx2.MockTransport(handler))
+    schema_hint = json.dumps({"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]})
+    result = llm.chat_json([{"role": "user", "content": "go"}], schema_hint=schema_hint, strict=True)
+
+    assert result == {"ok": True}
+    assert captured["body"]["response_format"]["type"] == "json_schema"
+    assert captured["body"]["response_format"]["json_schema"]["strict"] is True
+    assert captured["body"]["response_format"]["json_schema"]["schema"]["additionalProperties"] is False
+
+
+def test_chat_json_falls_back_to_loose_mode_when_strict_and_schema_hint_invalid():
+    captured = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx2.Response(200, json={
+            "choices": [{"message": {"content": json.dumps({"ok": True})}}],
+        })
+
+    llm = HostedLLM(LLMConfig(model="gpt-5.1-mini", api_key="sk-test"), transport=httpx2.MockTransport(handler))
+    result = llm.chat_json([{"role": "user", "content": "go"}], schema_hint="not valid json{{{", strict=True)
+
+    assert result == {"ok": True}
+    assert captured["body"]["response_format"]["type"] == "json_object"
 
 
 def test_openai_model_override_applies_to_every_role(monkeypatch):

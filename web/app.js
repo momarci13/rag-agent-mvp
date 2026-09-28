@@ -1,941 +1,485 @@
-// Quant Research Agents — Chat UI + comprehensive report output
+// Model Studio: Modeler and Validator agents
 
-// ── State ────────────────────────────────────────────────────────────────────
-const state = {
-  currentSection: 'dashboard',
-  theme: localStorage.getItem('theme') || 'light',
-  sidebarCollapsed: false,
-  systemHealth: null,
-  // Chat state
-  currentTaskId: null,
-  isThinking: false,
-  quantRun: null,
-  riskRun: null,
+const SECTIONS = ['projects', 'new', 'library', 'settings', 'about'];
+const TITLES = { projects: 'Projects', new: 'New project', library: 'Library', settings: 'Settings', about: 'Privacy and terms', project: 'Project' };
+const OUTCOME = {
+  approved: ['Approved', 'ok'],
+  approved_with_conditions: ['Approved with conditions', 'warn'],
+  remediation_required: ['Remediation required', 'bad'],
+  rejected: ['Rejected', 'bad'],
+};
+const STATUS = {
+  queued: ['Queued', 'neutral'], running: ['Running', 'info'], awaiting_signoff: ['Awaiting sign-off', 'warn'],
+  signed_off: ['Signed off', 'ok'], failed: ['Failed', 'bad'], cancelled: ['Cancelled', 'neutral'],
+};
+const SEV_ORDER = { critical: 4, high: 3, medium: 2, low: 1, observation: 0 };
+
+const state = { theme: 'light', sidebarCollapsed: false, project: null, stream: null, findingFilter: 'open', refreshTimer: null };
+
+// ── Storage (preferences in localStorage; token in sessionStorage) ──────────
+const prefs = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, String(v)); } catch { /* unavailable */ } },
+};
+const token = {
+  get() { try { return sessionStorage.getItem('studioToken') || ''; } catch { return ''; } },
+  set(v) { try { v ? sessionStorage.setItem('studioToken', v) : sessionStorage.removeItem('studioToken'); } catch { /* unavailable */ } },
 };
 
-// ── Utility ───────────────────────────────────────────────────────────────────
-function $(id) { return document.getElementById(id); }
-
-async function fetchJson(url, options = {}) {
-  const resp = await fetch(url, options);
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`${resp.status} ${resp.statusText}: ${text}`);
+// ── Utilities ────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+async function api(url, opts = {}) {
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    let d = await r.text();
+    try { d = JSON.parse(d).detail || d; } catch { /* not JSON */ }
+    throw new Error(`${r.status}: ${typeof d === 'string' ? d : JSON.stringify(d)}`);
   }
-  return resp.json();
+  return r.json();
+}
+function when(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+function tag(label, kind) { return `<span class="tag tag--${kind}">${esc(label)}</span>`; }
+function sevTag(s) { return tag(s, { critical: 'bad', high: 'bad', medium: 'warn', low: 'neutral', observation: 'neutral' }[s] || 'neutral'); }
+function fileUrl(pid, rel) { return `/api/projects/${encodeURIComponent(pid)}/files/${rel.split('/').map(encodeURIComponent).join('/')}`; }
+function setError(id, msg) {
+  const el = $(id);
+  if (!el) return;
+  let e = $(`${id}Error`);
+  if (!e) {
+    e = document.createElement('p'); e.id = `${id}Error`; e.className = 'field-error';
+    el.insertAdjacentElement('afterend', e);
+    el.setAttribute('aria-describedby', [el.getAttribute('aria-describedby'), e.id].filter(Boolean).join(' '));
+  }
+  e.textContent = msg || ''; e.hidden = !msg;
+  if (msg) el.setAttribute('aria-invalid', 'true'); else el.removeAttribute('aria-invalid');
+}
+function requireFields(list) {
+  let first = null;
+  list.forEach(([id, msg, check]) => {
+    const el = $(id);
+    const ok = check ? check(el) : Boolean(el && String(el.value || '').trim());
+    setError(id, ok ? '' : msg);
+    if (!ok && !first) first = el;
+  });
+  if (first) first.focus();
+  return !first;
 }
 
-function setTheme(theme) {
-  document.documentElement.className = theme;
-  state.theme = theme;
-  localStorage.setItem('theme', theme);
-  $('themeToggle').textContent = theme === 'dark' ? '☀️' : '🌙';
-  const prismTheme = $('prism-theme');
-  if (prismTheme) {
-    prismTheme.href = theme === 'dark'
-      ? 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-dark.min.css'
-      : 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css';
-  }
+// ── Theme and layout ─────────────────────────────────────────────────────────
+function prefersDark() { return window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches; }
+function setTheme(t) {
+  t = ['light', 'dark', 'auto'].includes(t) ? t : 'light';
+  document.documentElement.classList.remove('light', 'dark', 'auto');
+  document.documentElement.classList.add(t);
+  state.theme = t; prefs.set('theme', t);
+  const dark = t === 'dark' || (t === 'auto' && prefersDark());
+  $('themeToggle').textContent = dark ? 'Light mode' : 'Dark mode';
+  $('themeToggle').setAttribute('aria-pressed', String(dark));
+  $('themeSelect').value = t;
 }
-
 function toggleSidebar() {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   $('sidebar').classList.toggle('collapsed', state.sidebarCollapsed);
   document.querySelector('.main-content').classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
-  localStorage.setItem('sidebarCollapsed', state.sidebarCollapsed);
+  const b = $('sidebarToggle');
+  b.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
+  b.setAttribute('aria-label', state.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  b.innerHTML = `<span aria-hidden="true">${state.sidebarCollapsed ? '&raquo;' : '&laquo;'}</span>`;
+  prefs.set('sidebarCollapsed', state.sidebarCollapsed);
+}
+function setMobileMenu(open) {
+  $('sidebar').classList.toggle('mobile-open', open);
+  $('mobileMenuBtn').setAttribute('aria-expanded', String(open));
 }
 
-function showSection(sectionId) {
-  document.querySelectorAll('.nav-item').forEach(item =>
-    item.classList.toggle('active', item.dataset.section === sectionId)
-  );
-  document.querySelectorAll('.section').forEach(sec =>
-    sec.classList.toggle('active', sec.id === `${sectionId}-section`)
-  );
-  const titles = { dashboard: 'Dashboard', tasks: 'Chat', quant: 'Quant Team', 'risk-validation': 'Risk Validation', reports: 'Report Viewer', data: 'Data Management', settings: 'Settings' };
-  $('pageTitle').textContent = titles[sectionId] || 'Quant Research Agents';
-  state.currentSection = sectionId;
-  localStorage.setItem('currentSection', sectionId);
-}
-
-function addActivityItem(icon, title) {
-  const feed = $('activityFeed');
-  if (!feed) return;
-  const item = document.createElement('div');
-  item.className = 'activity-item';
-  item.innerHTML = `<div class="activity-icon">${icon}</div><div class="activity-content"><div class="activity-title">${title}</div><div class="activity-time">Just now</div></div>`;
-  feed.insertBefore(item, feed.firstChild);
-  while (feed.children.length > 10) feed.removeChild(feed.lastChild);
-}
-
-function updateSystemStatus(health) {
-  state.systemHealth = health;
-  const ind = $('statusIndicator');
-  const sh = $('systemHealth');
-  if (health?.status === 'ok') {
-    ind && ind.classList.add('active');
-    if (sh) { sh.textContent = 'Healthy'; sh.style.color = 'var(--text-accent)'; }
-  } else {
-    ind && ind.classList.remove('active');
-    if (sh) { sh.textContent = health?.status || 'Unknown'; sh.style.color = '#ef4444'; }
-  }
-}
-
-// ── Chat rendering ─────────────────────────────────────────────────────────────
-
-function setInput(text) {
-  const inp = $('chatInput');
-  if (inp) { inp.value = text; inp.focus(); }
-}
-
-function scrollToBottom() {
-  const thread = $('chatThread');
-  if (thread) thread.scrollTop = thread.scrollHeight;
-}
-
-function hideWelcome() {
-  const w = $('chatWelcome');
-  if (w) w.style.display = 'none';
-}
-
-function appendUserBubble(text) {
-  hideWelcome();
-  const thread = $('chatThread');
-  const div = document.createElement('div');
-  div.className = 'chat-message user-message';
-  div.innerHTML = `<div class="user-bubble">${escapeHtml(text)}</div>`;
-  thread.appendChild(div);
-  scrollToBottom();
-}
-
-function appendThinkingIndicator() {
-  const thread = $('chatThread');
-  const div = document.createElement('div');
-  div.className = 'chat-message agent-message';
-  div.id = 'thinkingIndicator';
-  div.innerHTML = `<div class="agent-bubble thinking"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>`;
-  thread.appendChild(div);
-  scrollToBottom();
-  return div;
-}
-
-function removeThinkingIndicator() {
-  const ind = $('thinkingIndicator');
-  if (ind) ind.remove();
-}
-
-function appendAgentCard(data) {
-  removeThinkingIndicator();
-  const thread = $('chatThread');
-  const narrative = data.narrative || {};
-  const code = data.code || '';
-  const pdfUrl = data.pdf_url || null;
-  const taskId = data.task_id || '';
-
-  const keyResultsHtml = Array.isArray(narrative.key_results) && narrative.key_results.length
-    ? `<ul class="key-results">${narrative.key_results.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`
-    : '';
-
-  const limitationsHtml = narrative.limitations
-    ? `<div class="narrative-section"><strong>Limitations</strong><p>${escapeHtml(narrative.limitations)}</p></div>`
-    : '';
-
-  const codeHtml = code
-    ? `<details class="code-details">
-        <summary>Show Generated Code</summary>
-        <pre><code class="language-python">${escapeHtml(code.slice(0, 6000))}</code></pre>
-      </details>`
-    : '';
-
-  const pdfHtml = pdfUrl
-    ? `<a class="pdf-btn" href="${pdfUrl}" target="_blank" download>Download PDF Report</a>`
-    : '';
-
-  const noNarrative = !narrative.objective;
-
-  const div = document.createElement('div');
-  div.className = 'chat-message agent-message';
-  div.dataset.taskId = taskId;
-
-  div.innerHTML = `
-    <div class="agent-card">
-      ${noNarrative ? '<div class="narrative-section"><p>Task completed. Results saved.</p></div>' : `
-      <div class="narrative-section">
-        <strong>Objective</strong>
-        <p>${escapeHtml(narrative.objective || '')}</p>
-      </div>
-      <div class="narrative-section">
-        <strong>Methodology</strong>
-        <p>${escapeHtml(narrative.methodology || '')}</p>
-      </div>
-      ${keyResultsHtml ? `<div class="narrative-section"><strong>Key Results</strong>${keyResultsHtml}</div>` : ''}
-      <div class="narrative-section">
-        <strong>Analysis</strong>
-        <p>${escapeHtml(narrative.analysis || '')}</p>
-      </div>
-      <div class="narrative-section">
-        <strong>Conclusions</strong>
-        <p>${escapeHtml(narrative.conclusions || '')}</p>
-      </div>
-      ${limitationsHtml}
-      `}
-      ${codeHtml}
-      <div class="card-actions">
-        ${pdfHtml}
-        <span class="task-id-label">ID: ${taskId.slice(0, 8)}</span>
-      </div>
-    </div>
-  `;
-
-  thread.appendChild(div);
-  if (data.discovered_sources && data.discovered_sources.length > 0) {
-    const tid = data.task_id || taskId;
-    if (tid) thread.appendChild(renderSourcePanel(data.discovered_sources, tid));
-  }
-  if (window.Prism) setTimeout(() => Prism.highlightAll(), 50);
-  scrollToBottom();
-}
-
-function appendFollowUpBubble(text, sources, taskId) {
-  removeThinkingIndicator();
-  const thread = $('chatThread');
-  const div = document.createElement('div');
-  div.className = 'chat-message agent-message';
-  div.innerHTML = `<div class="agent-bubble follow-up">${escapeHtml(text)}</div>`;
-  thread.appendChild(div);
-  if (sources && sources.length > 0 && taskId) {
-    thread.appendChild(renderSourcePanel(sources, taskId));
-  }
-  scrollToBottom();
-}
-
-function appendErrorBubble(text) {
-  removeThinkingIndicator();
-  const thread = $('chatThread');
-  const div = document.createElement('div');
-  div.className = 'chat-message agent-message';
-  div.innerHTML = `<div class="agent-bubble error-bubble">Error: ${escapeHtml(text)}</div>`;
-  thread.appendChild(div);
-  scrollToBottom();
-}
-
-// ── Background task progress (SSE) ────────────────────────────────────────────
-
-function appendProgressCard(taskId) {
-  removeThinkingIndicator();
-  const thread = $('chatThread');
-  const div = document.createElement('div');
-  div.className = 'chat-message agent-message';
-  div.id = `progress-card-${taskId}`;
-  div.innerHTML = `
-    <div class="agent-card progress-card">
-      <div class="progress-label">Working on your request…</div>
-      <div class="progress-bar-track">
-        <div class="progress-bar-fill" id="progress-fill-${taskId}"></div>
-      </div>
-      <div class="progress-status" id="progress-status-${taskId}">Initializing pipeline…</div>
-    </div>`;
-  thread.appendChild(div);
-  scrollToBottom();
-}
-
-function subscribeToTaskProgress(taskId) {
-  const es = new EventSource(`/api/tasks/${taskId}/stream`);
-  let percent = 10;
-
-  es.addEventListener('progress', (e) => {
-    const meta = JSON.parse(e.data);
-    const statusEl = $(`progress-status-${taskId}`);
-    const fillEl = $(`progress-fill-${taskId}`);
-    if (statusEl && meta.progress) statusEl.textContent = meta.progress;
-    percent = Math.min(percent + 15, 85);
-    if (fillEl) fillEl.style.width = `${percent}%`;
+// ── Routing ──────────────────────────────────────────────────────────────────
+function route() {
+  const hash = location.hash.replace('#', '') || prefs.get('lastSection') || 'projects';
+  const [name, id] = hash.split('/');
+  const section = name === 'project' && id ? 'project' : (SECTIONS.includes(name) ? name : 'projects');
+  document.querySelectorAll('.section').forEach(s => s.classList.toggle('active', s.id === `${section}-section`));
+  document.querySelectorAll('.nav-item').forEach(n => {
+    const active = n.dataset.section === section || (section === 'project' && n.dataset.section === 'projects');
+    n.classList.toggle('active', active);
+    active ? n.setAttribute('aria-current', 'page') : n.removeAttribute('aria-current');
   });
+  $('pageTitle').textContent = TITLES[section];
+  document.title = `${TITLES[section]} · Model Studio`;
+  if (section !== 'project') prefs.set('lastSection', section);
+  if (state.stream && section !== 'project') { state.stream.close(); state.stream = null; }
+  if (section === 'projects') loadProjects();
+  if (section === 'library') loadLibrary();
+  if (section === 'project') openProject(id);
+  setMobileMenu(false);
+}
 
-  es.addEventListener('completed', (e) => {
-    es.close();
-    const result = JSON.parse(e.data);
-    const progressCard = $(`progress-card-${taskId}`);
-    if (progressCard) progressCard.remove();
-    appendAgentCard(result);
-    if (result.task_id && result.task_id !== taskId) {
-      state.currentTaskId = result.task_id;
+// ── Projects list ────────────────────────────────────────────────────────────
+async function loadProjects() {
+  const body = $('projectRows');
+  try {
+    const { projects } = await api('/api/projects');
+    if (!projects.length) {
+      body.innerHTML = '<tr><td colspan="7" class="empty">No projects yet. <a href="#new">Start one</a>.</td></tr>';
+      return;
     }
-    state.isThinking = false;
-    setSendBtnState(false);
-    addActivityItem('⚡', `Completed task`);
-    loadConversationList();
-    loadDashboardStats();
-  });
-
-  es.addEventListener('failed', (e) => {
-    es.close();
-    const data = JSON.parse(e.data);
-    const progressCard = $(`progress-card-${taskId}`);
-    if (progressCard) progressCard.remove();
-    appendErrorBubble(data.error || 'Task failed');
-    state.isThinking = false;
-    setSendBtnState(false);
-  });
-
-  es.onerror = () => {
-    es.close();
-    const progressCard = $(`progress-card-${taskId}`);
-    if (progressCard) progressCard.remove();
-    appendErrorBubble('Lost connection to task stream. The task may still be running — refresh to check.');
-    state.isThinking = false;
-    setSendBtnState(false);
-  };
+    body.innerHTML = projects.map(p => {
+      const [sl, sk] = STATUS[p.status] || [p.status, 'neutral'];
+      const [ol, ok] = OUTCOME[p.outcome] || ['', 'neutral'];
+      const f = p.open_findings;
+      const counts = ['critical', 'high', 'medium', 'low'].filter(s => f[s]).map(s => `${f[s]} ${s}`).join(', ') || 'None';
+      return `<tr>
+        <td><a href="#project/${esc(p.project_id)}">${esc(p.title)}</a></td>
+        <td>${p.mode === 'develop_and_validate' ? 'Develop + validate' : 'External validation'}</td>
+        <td>${tag(sl, sk)}</td>
+        <td>${ol ? tag(ol, ok) : '<span class="muted">Pending</span>'}</td>
+        <td class="num">${p.rounds} / ${p.max_rounds}</td>
+        <td>${esc(counts)}</td>
+        <td class="num">${esc(when(p.updated_at))}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">Could not load projects: ${esc(e.message)}</td></tr>`;
+  }
 }
 
-// ── Source approval panel ─────────────────────────────────────────────────────
+// ── New project ──────────────────────────────────────────────────────────────
+function currentMode() { return document.querySelector('input[name="mode"]:checked').value; }
+function updateModeFields() {
+  const ext = currentMode() === 'validate_external';
+  $('packageField').hidden = !ext;
+  $('roundsField').hidden = ext;
+  $('pPackage').required = ext;
+}
+async function loadFrameworks() {
+  try {
+    const { frameworks } = await api('/api/frameworks');
+    $('frameworkChoices').innerHTML = frameworks.map(f => `
+      <label class="check"><input type="checkbox" name="frameworks" value="${esc(f.key)}" checked> ${esc(f.label)}</label>`).join('');
+  } catch (e) {
+    $('frameworkChoices').textContent = 'Could not load frameworks.';
+  }
+}
+async function createProject() {
+  if ($('pToken').value) token.set($('pToken').value);
+  const ext = currentMode() === 'validate_external';
+  const checks = [
+    ['pTitle', 'Enter a title.'],
+    ['pBrief', 'Describe what the model must do.'],
+    ['pData', 'Add at least one data file.', el => el.files.length > 0],
+    ['pToken', 'Enter the STUDIO_API_TOKEN set on the server.', el => Boolean(el.value || token.get())],
+  ];
+  if (ext) checks.splice(3, 0, ['pPackage', 'Add the model code and documentation.', el => el.files.length > 0]);
+  if (!requireFields(checks)) return;
 
-function renderSourcePanel(sources, taskId) {
-  const srcLabels = { arxiv: 'arXiv', openalex: 'OpenAlex', semantic_scholar: 'Semantic Scholar' };
-  const itemsHtml = sources.map(s => {
-    const label = srcLabels[s.source] || s.source;
-    const hopBadge = s.hop > 0 ? '<span class="source-badge badge-hop">cited</span> ' : '';
-    const srcBadge = `<span class="source-badge badge-${s.source}">${label}</span>`;
-    const year = s.year ? ` (${s.year})` : '';
-    return `<label class="source-item">
-      <input type="checkbox" value="${escapeHtml(s.id)}" checked>
-      ${hopBadge}${srcBadge}
-      <span class="source-title">${escapeHtml(s.title + year)}</span>
-    </label>`;
+  const fd = new FormData();
+  fd.append('mode', currentMode());
+  fd.append('title', $('pTitle').value.trim());
+  fd.append('brief', $('pBrief').value.trim());
+  fd.append('max_rounds', ext ? '1' : $('pRounds').value);
+  fd.append('challenger', $('pChallenger').value);
+  document.querySelectorAll('input[name="frameworks"]:checked').forEach(c => fd.append('frameworks', c.value));
+  const add = (id, field) => Array.from($(id).files).forEach(f => fd.append(field, f));
+  add('pData', 'data'); add('pConcept', 'concept_papers'); add('pRegs', 'regulations');
+  if (ext) add('pPackage', 'package');
+
+  const btn = $('createBtn');
+  btn.disabled = true; btn.textContent = 'Uploading';
+  $('createStatus').textContent = 'Uploading files and starting the agents.';
+  try {
+    const r = await api('/api/projects', { method: 'POST', body: fd, headers: { 'X-Studio-Token': $('pToken').value || token.get() } });
+    $('projectForm').reset(); updateModeFields(); loadFrameworks();
+    $('createStatus').textContent = '';
+    location.hash = `#project/${r.project_id}`;
+  } catch (e) {
+    $('createStatus').textContent = `Could not start: ${e.message}`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Start project';
+  }
+}
+
+// ── Project detail ───────────────────────────────────────────────────────────
+async function openProject(id) {
+  if (state.stream) { state.stream.close(); state.stream = null; }
+  $('traceLog').innerHTML = '';
+  $('projectTitle').textContent = 'Loading';
+  try {
+    await refreshProject(id);
+  } catch (e) {
+    $('projectTitle').textContent = 'Project not found';
+    $('projectMeta').textContent = e.message;
+    return;
+  }
+  const p = state.project;
+  renderTrace(p.trace, true);
+  if (['queued', 'running'].includes(p.status)) {
+    const es = new EventSource(`/api/projects/${encodeURIComponent(id)}/stream?after=${p.trace.length}`);
+    state.stream = es;
+    es.addEventListener('trace', ev => {
+      renderTrace([JSON.parse(ev.data)], false);
+      clearTimeout(state.refreshTimer);
+      state.refreshTimer = setTimeout(() => refreshProject(id).catch(() => {}), 800);
+    });
+    es.addEventListener('done', () => { es.close(); state.stream = null; refreshProject(id); });
+    es.onerror = () => { es.close(); state.stream = null; };
+  }
+}
+
+async function refreshProject(id) {
+  const { project } = await api(`/api/projects/${encodeURIComponent(id)}`);
+  state.project = project;
+  renderProject(project);
+  loadFiles(id);
+}
+
+function renderTrace(events, reset) {
+  const log = $('traceLog');
+  if (reset) log.innerHTML = '';
+  events.forEach(e => {
+    const li = document.createElement('li');
+    li.className = `trace trace--${e.status}`;
+    li.innerHTML = `<span class="trace-agent">${esc(e.agent)}</span>
+      <span class="trace-step">${esc(e.step.replace(/-/g, ' '))}</span>
+      <time class="trace-time">${esc(new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</time>
+      <span class="trace-msg">${esc((e.message || '').split('\n')[0])}</span>`;
+    log.appendChild(li);
+  });
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderProject(p) {
+  const inp = p.input;
+  $('projectTitle').textContent = inp.title;
+  $('pageTitle').textContent = inp.title;
+  $('projectMeta').textContent = `${inp.mode === 'develop_and_validate' ? 'Develop and validate' : 'Validation of an external model'} · created ${when(p.created_at)} · frameworks: ${inp.frameworks.join(', ') || 'generic practice only'}`;
+  const [sl, sk] = STATUS[p.status] || [p.status, 'neutral'];
+  const oc = OUTCOME[p.final_outcome || (p.rounds.at(-1)?.validator?.outcome)];
+  $('projectTags').innerHTML = tag(sl, sk) + (oc ? tag(oc[0], oc[1]) : '');
+  const err = $('projectError');
+  err.hidden = !p.error; err.textContent = p.error ? `The run stopped: ${p.error}` : '';
+
+  renderRounds(p);
+  renderFindings(p);
+  renderRequirements(p);
+  renderDocs(p);
+
+  $('signoffPanel').hidden = !['awaiting_signoff', 'signed_off'].includes(p.status);
+  $('signoffList').innerHTML = (p.signoffs || []).map(s =>
+    `<li><strong>${esc(s.name)}</strong>${s.role ? `, ${esc(s.role)}` : ''}: ${esc(s.decision)} on ${esc(when(s.at))}${s.comment ? `<br><span class="muted">${esc(s.comment)}</span>` : ''}</li>`).join('');
+}
+
+function countsText(run) {
+  if (!run) return 'not run';
+  const c = { passed: 0, failed: 0, error: 0, skipped: 0 };
+  (run.results || []).forEach(r => { c[r.outcome] += 1; });
+  if (run.collection_error) return 'could not run';
+  return `${c.passed} passed, ${c.failed} failed${c.error ? `, ${c.error} errors` : ''}`;
+}
+
+function renderRounds(p) {
+  const list = $('roundList');
+  if (!p.rounds.length) { list.innerHTML = '<li class="muted">Waiting for the first round.</li>'; return; }
+  list.innerHTML = p.rounds.map(r => {
+    const m = r.modeler, v = r.validator;
+    const oc = OUTCOME[v.outcome];
+    const primary = m.spec?.acceptance_criteria?.find(a => a.primary);
+    const pm = primary && m.pipeline?.metrics ? m.pipeline.metrics[primary.metric] : undefined;
+    const rep = v.replication;
+    const ch = v.challenger;
+    const modelerLine = p.input.mode === 'validate_external'
+      ? `<p><strong>Subject:</strong> ${esc(m.spec?.title || 'reading package')}</p>`
+      : `<p><strong>Modeler:</strong> ${esc(m.spec ? `${m.spec.title} (${m.spec.category.replace('_', ' ')})` : 'designing')}${m.tests ? ` · tests ${countsText(m.tests)}` : ''}${pm !== undefined ? ` · ${esc(primary.metric)} ${Number(pm).toPrecision(4)}` : ''}${m.responses?.length ? ` · answered ${m.responses.length} findings` : ''}</p>`;
+    const validatorLine = `<p><strong>Validator:</strong> ${rep ? (rep.reproduced ? 'replicated' : rep.pipeline_ok ? `not reproduced (${esc(rep.mismatches.join(', '))})` : 'pipeline failed') : 'pending'}${v.independent_tests ? ` · independent tests ${countsText(v.independent_tests)}` : ''}${ch && ch.primary_metric ? ` · challenger ${esc(ch.primary_metric)} ${ch.challenger_metrics[ch.primary_metric] !== undefined ? Number(ch.challenger_metrics[ch.primary_metric]).toPrecision(4) : 'n/a'}` : ''}</p>`;
+    return `<li class="round">
+      <div class="round-head"><span class="round-no">Round ${r.number}</span>${oc ? tag(oc[0], oc[1]) : '<span class="muted">in progress</span>'}</div>
+      ${modelerLine}${validatorLine}
+      ${v.conclusion ? `<details><summary>Validator conclusion</summary><div class="prose-block">${esc(v.conclusion).replace(/\n\n/g, '</p><p>').replace(/^/, '<p>')}</p></div></details>` : ''}
+    </li>`;
   }).join('');
-
-  const panel = document.createElement('div');
-  panel.className = 'source-panel';
-  panel.innerHTML = `
-    <div class="source-panel-header">📚 Discovered Sources (${sources.length}) — select to add to Knowledge Base</div>
-    <div class="source-list">${itemsHtml}</div>
-    <div class="source-panel-footer">
-      <button class="source-approve-btn" onclick="approveSelectedSources('${escapeHtml(taskId)}', this.closest('.source-panel'))">Add selected to KB</button>
-    </div>`;
-  return panel;
 }
 
-async function approveSelectedSources(taskId, panelEl) {
-  const checked = panelEl.querySelectorAll('input[type="checkbox"]:checked');
-  const sourceIds = Array.from(checked).map(cb => cb.value);
-  const btn = panelEl.querySelector('.source-approve-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
-  try {
-    const result = await fetchJson('/api/kb/approve', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: taskId, source_ids: sourceIds }),
-    });
-    const footer = panelEl.querySelector('.source-panel-footer');
-    if (footer) footer.innerHTML = `<span class="source-success">✓ ${result.ingested} source${result.ingested !== 1 ? 's' : ''} added to KB</span>`;
-    panelEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.disabled = true);
-  } catch (err) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Add selected to KB'; }
-    appendErrorBubble(`Failed to approve sources: ${err.message}`);
-  }
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-// ── Send message ───────────────────────────────────────────────────────────────
-
-async function sendMessage() {
-  if (state.isThinking) return;
-  const input = $('chatInput');
-  const text = input.value.trim();
-  if (!text) return;
-
-  input.value = '';
-  input.style.height = 'auto';
-  appendUserBubble(text);
-  appendThinkingIndicator();
-  state.isThinking = true;
-  setSendBtnState(true);
-
-  try {
-    if (!state.currentTaskId) {
-      // New conversation → run-task (now returns {status: "queued", task_id} immediately)
-      const data = await fetchJson('/run-task', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: text }),
-      });
-      state.currentTaskId = data.task_id;
-      $('chatTitle').textContent = text.slice(0, 60) + (text.length > 60 ? '…' : '');
-      addActivityItem('⚡', `Task: ${text.slice(0, 40)}`);
-
-      if (data.status === 'queued') {
-        // Async path: show progress bar and subscribe to SSE stream
-        appendProgressCard(data.task_id);
-        subscribeToTaskProgress(data.task_id);
-        // isThinking stays true until SSE completes/fails — don't reset here
-        return;
-      } else {
-        // Legacy sync fallback (if server returns full result)
-        appendAgentCard(data);
-        await loadConversationList();
-        await loadDashboardStats();
-      }
-    } else {
-      // Follow-up → conversation endpoint
-      const data = await fetchJson(`/api/tasks/${state.currentTaskId}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text, iteration: 0 }),
-      });
-      appendFollowUpBubble(
-        data.assistant_response || 'Done.',
-        data.discovered_sources || [],
-        data.task_id || state.currentTaskId,
-      );
-    }
-  } catch (err) {
-    appendErrorBubble(err.message);
-  } finally {
-    state.isThinking = false;
-    setSendBtnState(false);
-  }
-}
-
-function setSendBtnState(loading) {
-  const btn = $('sendBtn');
-  const txt = $('sendBtnText');
-  if (!btn) return;
-  btn.disabled = loading;
-  if (txt) txt.textContent = loading ? '...' : 'Send';
-}
-
-function startNewChat() {
-  state.currentTaskId = null;
-  $('chatTitle').textContent = 'New Conversation';
-  const thread = $('chatThread');
-  thread.innerHTML = `
-    <div class="chat-welcome" id="chatWelcome">
-      <div class="welcome-icon">⚡</div>
-      <h3>Start a research task</h3>
-      <p>Ask anything — financial models, trading strategies, ML experiments, academic writing.</p>
-      <div class="welcome-examples">
-        <button class="example-chip" onclick="setInput('Backtest a 50/200 SMA crossover on SPY, QQQ, IWM')">SMA crossover backtest</button>
-        <button class="example-chip" onclick="setInput('Compute the volatility of SPY over 2020-2024 with bootstrap CIs')">SPY volatility analysis</button>
-        <button class="example-chip" onclick="setInput('Build an LSTM model to forecast AAPL weekly returns')">LSTM return forecast</button>
-        <button class="example-chip" onclick="setInput('Write a 3-page report on momentum factor anomalies')">Momentum factor report</button>
+function renderFindings(p) {
+  const box = $('findingList');
+  const last = p.rounds.at(-1);
+  const all = last ? last.validator.findings : [];
+  const rows = all.filter(f => state.findingFilter === 'all' || f.status === 'open')
+    .sort((a, b) => (a.status === 'open' ? 0 : 1) - (b.status === 'open' ? 0 : 1) || SEV_ORDER[b.severity] - SEV_ORDER[a.severity]);
+  if (!all.length) { box.innerHTML = `<p class="muted">${last ? 'No findings.' : 'Findings appear after the first validation.'}</p>`; return; }
+  if (!rows.length) { box.innerHTML = '<p class="muted">No open findings.</p>'; return; }
+  box.innerHTML = rows.map(f => `
+    <details class="finding">
+      <summary>
+        ${sevTag(f.severity)}
+        <span class="finding-title">${esc(f.title)}</span>
+        <span class="finding-id">${esc(f.finding_id)}</span>
+        ${f.status !== 'open' ? tag(f.status.replace('_', ' '), 'ok') : ''}
+      </summary>
+      <div class="finding-body">
+        <p class="muted">${esc(f.area)} · ${esc(f.source.replace('_', ' '))} · raised in round ${f.raised_round}${f.closed_round ? `, closed in round ${f.closed_round}` : ''}</p>
+        <p>${esc(f.description)}</p>
+        ${f.evidence?.length ? `<h4>Evidence</h4><ul>${f.evidence.slice(0, 6).map(e => `<li><pre>${esc(e)}</pre></li>`).join('')}</ul>` : ''}
+        ${f.citations?.length ? `<p><strong>References:</strong> ${f.citations.map(c => esc(c.locator ? `${c.source}, ${c.locator}` : c.source)).join('; ')}</p>` : ''}
+        ${f.recommendation ? `<p><strong>Recommendation:</strong> ${esc(f.recommendation)}</p>` : ''}
+        ${f.modeler_response ? `<p><strong>Modeler response (${esc(f.modeler_response.action.replace('_', ' '))}):</strong> ${esc(f.modeler_response.explanation)}</p>` : ''}
       </div>
-    </div>`;
-  $('chatInput').focus();
+    </details>`).join('');
 }
 
-// ── Conversation list ──────────────────────────────────────────────────────────
-
-async function loadConversationList() {
-  try {
-    const data = await fetchJson('/api/tasks?limit=30&sort_by=-updated_at');
-    const list = $('conversationList');
-    if (!list) return;
-    if (!data.tasks || data.tasks.length === 0) {
-      list.innerHTML = '<div class="conv-placeholder">No conversations yet</div>';
-      return;
-    }
-    list.innerHTML = data.tasks.map(t => `
-      <div class="conv-item ${t.task_id === state.currentTaskId ? 'active' : ''}"
-           onclick="openConversation('${t.task_id}', ${JSON.stringify(t.title).replace(/"/g, '&quot;')})">
-        <div class="conv-title">${escapeHtml((t.title || 'Untitled').slice(0, 45))}</div>
-        <div class="conv-meta">${t.status} &bull; ${new Date(t.updated_at).toLocaleDateString()}</div>
-      </div>
-    `).join('');
-  } catch (e) {
-    console.error('Failed to load conversation list:', e);
-  }
+function renderRequirements(p) {
+  const last = p.rounds.at(-1);
+  const v = last?.validator;
+  const box = $('requirementTable');
+  if (!v || !v.requirements.length) { box.innerHTML = '<p class="muted">Available after the validator has run.</p>'; $('requirementSummary').textContent = ''; return; }
+  const assess = Object.fromEntries((v.review?.requirement_assessments || []).map(a => [a.req_id, a]));
+  const counts = {};
+  v.requirements.forEach(r => { const st = assess[r.req_id]?.status || 'not_assessed'; counts[st] = (counts[st] || 0) + 1; });
+  $('requirementSummary').textContent = `${v.requirements.length} items: ` + Object.entries(counts).map(([k, n]) => `${n} ${k.replace(/_/g, ' ')}`).join(', ');
+  const kind = { met: 'ok', partially_met: 'warn', not_met: 'bad', not_applicable: 'neutral', not_assessed: 'neutral' };
+  box.innerHTML = `<table class="data-table"><thead><tr><th scope="col">ID</th><th scope="col">Requirement</th><th scope="col">Source</th><th scope="col">Status</th></tr></thead><tbody>
+    ${v.requirements.map(r => {
+      const a = assess[r.req_id]; const st = a ? a.status : 'not_assessed';
+      const src = r.citation ? (r.citation.locator ? `${r.citation.source}, ${r.citation.locator}` : r.citation.source) : r.framework;
+      return `<tr><td class="req-id">${esc(r.req_id)}</td><td>${esc(r.text)}${a?.evidence ? `<br><span class="muted">${esc(a.evidence)}</span>` : ''}</td><td>${esc(src)}</td><td>${tag(st.replace(/_/g, ' '), kind[st])}</td></tr>`;
+    }).join('')}</tbody></table>`;
 }
 
-async function openConversation(taskId, title) {
-  state.currentTaskId = taskId;
-  $('chatTitle').textContent = (title || taskId).slice(0, 60);
-
-  // Highlight active in sidebar
-  document.querySelectorAll('.conv-item').forEach(el =>
-    el.classList.toggle('active', el.onclick?.toString().includes(taskId))
-  );
-
-  // Load task and re-render thread
-  try {
-    const data = await fetchJson(`/api/tasks/${taskId}`);
-    const task = data.task;
-    const thread = $('chatThread');
-    thread.innerHTML = '';
-
-    // Render original task as user bubble
-    if (task.task) appendUserBubble(task.task);
-
-    // Render artifacts as agent cards (last DS/quant/writing artifact)
-    const lastArtifact = (task.artifacts || []).filter(a => a.type !== 'literature').slice(-1)[0];
-    if (lastArtifact) {
-      const report = lastArtifact.report || {};
-      const narrative = report.narrative || {};
-      const hasPdf = report.pdf && typeof report.pdf === 'object' && report.pdf.pdf;
-      appendAgentCard({
-        task_id: taskId,
-        narrative,
-        code: (lastArtifact.payload || {}).code || '',
-        pdf_url: hasPdf ? `/api/reports/${taskId}/pdf` : null,
-      });
-    }
-
-    // Render subsequent messages
-    (task.messages || []).forEach(msg => {
-      if (msg.role === 'user') appendUserBubble(msg.content);
-      else if (msg.role === 'assistant') appendFollowUpBubble(msg.content);
-    });
-
-    showSection('tasks');
-    addActivityItem('📋', `Opened: ${(title || taskId).slice(0, 30)}`);
-  } catch (e) {
-    appendErrorBubble(`Failed to load conversation: ${e.message}`);
-  }
-}
-
-// ── Dashboard ──────────────────────────────────────────────────────────────────
-
-async function loadDashboardStats() {
-  try {
-    const data = await fetchJson('/api/tasks?limit=100');
-    const el = $('totalRuns');
-    if (el) el.textContent = data.total || 0;
-    const active = (data.tasks || []).filter(t => t.status === 'in-progress').length;
-    const activeEl = $('activeTasks');
-    if (activeEl) activeEl.textContent = active;
-    const reportsEl = $('totalReports');
-    if (reportsEl) reportsEl.textContent = (data.tasks || []).filter(t => t.status === 'completed').length;
-  } catch (e) {
-    console.error('Dashboard stats failed:', e);
-  }
-}
-
-async function loadSystemHealth() {
-  try {
-    const h = await fetchJson('/health');
-    updateSystemStatus(h);
-  } catch (e) {
-    updateSystemStatus({ status: 'error' });
-  }
-}
-
-// ── Reports (kept from original, simplified) ──────────────────────────────────
-
-async function loadReports() {
-  // Placeholder — real reports come from /api/reports/{task_id}/pdf
-  const list = $('reportsList');
-  if (!list) return;
-  try {
-    const data = await fetchJson('/api/tasks?limit=50&sort_by=-updated_at');
-    const withPdf = (data.tasks || []).filter(t => t.status === 'completed');
-    if (withPdf.length === 0) {
-      list.innerHTML = '<div class="no-reports">No completed tasks with reports yet</div>';
-      return;
-    }
-    list.innerHTML = withPdf.map(t => `
-      <div class="file-item" onclick="openConversation('${t.task_id}', ${JSON.stringify(t.title).replace(/"/g, '&quot;')})">
-        <span class="file-icon">📄</span>
-        <span class="file-name">${escapeHtml((t.title || 'Untitled').slice(0, 40))}</span>
-        <a class="pdf-link" href="/api/reports/${t.task_id}/pdf" target="_blank" download onclick="event.stopPropagation()">PDF</a>
-      </div>
-    `).join('');
-  } catch (e) {
-    list.innerHTML = `<div class="no-reports">Error: ${escapeHtml(e.message)}</div>`;
-  }
-}
-
-// ── Data ingestion ─────────────────────────────────────────────────────────────
-
-// Quant team
-
-function quantList(items) {
-  if (!Array.isArray(items) || items.length === 0) return '<span class="muted">None</span>';
-  return `<ul>${items.map(item => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>`;
-}
-
-function renderQuantRun(data) {
-  state.quantRun = data;
-  $('quantResult').hidden = false;
-  $('quantRunId').textContent = data.run_id || 'unknown';
-
-  const trace = Array.isArray(data.trace) ? data.trace : [];
-  $('quantTrace').innerHTML = trace.map(item => `
-    <div class="trace-item trace-${escapeHtml(item.status || 'unknown')}">
-      <div><strong>${escapeHtml(item.agent || 'agent')}</strong><span>${escapeHtml(item.status || '')}</span></div>
-      <p>${escapeHtml(item.summary || '')}</p>
-    </div>
-  `).join('') || '<span class="muted">No trace returned.</span>';
-
-  const research = data.research || {};
-  $('quantResearch').innerHTML = `
-    <p class="quant-thesis">${escapeHtml(research.thesis || 'No research brief returned.')}</p>
-    <h4>Evidence</h4>${quantList(research.evidence)}
-    <h4>Counter-evidence</h4>${quantList(research.counter_evidence)}
-    <h4>Assumptions</h4>${quantList(research.assumptions)}
-    <h4>Grounded source IDs</h4>${quantList(research.source_ids)}
-  `;
-
-  const strategy = data.strategy || {};
-  const backtest = data.backtest || {};
-  $('quantStrategy').innerHTML = `
-    <dl class="quant-kv">
-      <dt>Name</dt><dd>${escapeHtml(strategy.name || 'Not produced')}</dd>
-      <dt>Universe</dt><dd>${escapeHtml((strategy.universe || []).join(', '))}</dd>
-      <dt>Signal</dt><dd>${escapeHtml(strategy.signal || '')}</dd>
-      <dt>Sizing</dt><dd>${escapeHtml(strategy.position_sizing || '')}</dd>
-    </dl>
-    <h4>Backtest</h4>
-    <pre>${escapeHtml(JSON.stringify(backtest, null, 2))}</pre>
-  `;
-
-  const modelRisk = data.model_risk || {};
-  const executionRisk = data.execution_risk || {};
-  const intent = data.trade_intent || null;
-  const approved = Boolean(executionRisk.approved && executionRisk.approval_token && intent);
-  const modelPassed = Boolean(modelRisk.approved_for_order_proposal);
-  const badge = $('quantDecisionBadge');
-  badge.textContent = approved ? 'Human approval required' : (modelPassed ? 'Execution rejected' : 'Model rejected');
-  badge.className = `quant-badge ${approved ? 'approved' : 'rejected'}`;
-
-  $('quantRisk').innerHTML = `
-    <h4>Model risk gate</h4>
-    <p class="risk-state ${modelPassed ? 'pass' : 'fail'}">${modelPassed ? 'Passed' : 'Rejected'}</p>
-    ${quantList(modelRisk.reasons)}
-    <h4>IBKR execution gate</h4>
-    <p class="risk-state ${executionRisk.approved ? 'pass' : 'fail'}">${executionRisk.approved ? 'Passed — no order submitted' : 'Rejected'}</p>
-    ${quantList(executionRisk.reasons)}
-    <h4>Exact order preview</h4>
-    <pre>${escapeHtml(intent ? JSON.stringify(intent, null, 2) : 'No order was proposed.')}</pre>
-  `;
-
-  const executeButton = $('executeQuantBtn');
-  executeButton.hidden = !approved;
-  executeButton.disabled = !approved;
-  $('quantExecutionStatus').textContent = approved
-    ? 'Review every field. Submission still requires an exact confirmation phrase.'
-    : 'Nothing is eligible for broker submission.';
-}
-
-async function runQuantTeam() {
-  const task = $('quantTask')?.value.trim();
-  const apiToken = $('traderApiToken')?.value;
-  if (!task) { alert('Enter a quant research objective.'); return; }
-  if (!apiToken) { alert('Enter the TRADER_API_TOKEN configured on the server.'); return; }
-
-  const button = $('runQuantBtn');
-  const status = $('quantRunStatus');
-  button.disabled = true;
-  button.textContent = 'Running agents...';
-  status.textContent = 'Retrieving evidence and running the hosted free-model research/model/risk team. This may take several minutes.';
-  $('quantResult').hidden = true;
-  state.quantRun = null;
-
-  try {
-    const data = await fetchJson('/api/quant-team/run', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Trader-Token': apiToken,
-      },
-      body: JSON.stringify({ task }),
-    });
-    renderQuantRun(data);
-    status.textContent = 'Agent team completed. No broker order has been submitted.';
-    addActivityItem('🧠', `Quant team completed: ${(data.run_id || '').slice(0, 8)}`);
-  } catch (error) {
-    status.textContent = `Quant team failed: ${error.message}`;
-  } finally {
-    button.disabled = false;
-    button.textContent = 'Run agent team';
-  }
-}
-
-async function executeQuantOrder() {
-  const run = state.quantRun;
-  const intent = run?.trade_intent;
-  const approvalToken = run?.execution_risk?.approval_token;
-  const apiToken = $('traderApiToken')?.value;
-  if (!run || !intent || !approvalToken) return;
-  if (!apiToken) { alert('Enter the TRADER_API_TOKEN configured on the server.'); return; }
-
-  const phrase = `APPROVE ${intent.symbol} ${intent.action} ${intent.quantity}`;
-  const entered = window.prompt(`Review the exact preview above. Type this phrase to submit it:\n\n${phrase}`);
-  if (entered !== phrase) {
-    $('quantExecutionStatus').textContent = 'Order cancelled: confirmation phrase did not match.';
-    return;
-  }
-
-  const button = $('executeQuantBtn');
-  button.disabled = true;
-  $('quantExecutionStatus').textContent = 'Submitting the exact approved order to IBKR...';
-  try {
-    const receipt = await fetchJson(`/api/quant-team/${encodeURIComponent(run.run_id)}/execute`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Trader-Token': apiToken,
-      },
-      body: JSON.stringify({ approval_token: approvalToken }),
-    });
-    run.execution_risk.approval_token = null;
-    button.hidden = true;
-    $('quantExecutionStatus').innerHTML = `Submitted. Receipt:<pre>${escapeHtml(JSON.stringify(receipt, null, 2))}</pre>`;
-    addActivityItem('🛡️', `IBKR paper order ${receipt.order_id} submitted`);
-  } catch (error) {
-    button.disabled = false;
-    $('quantExecutionStatus').textContent = `IBKR submission failed: ${error.message}`;
-  }
-}
-
-// Risk validation
-
-function riskRatingBadgeClass(rating) {
-  const compliantLike = new Set(['compliant', 'low', 'not_applicable']);
-  return compliantLike.has(rating) ? 'approved' : 'rejected';
-}
-
-function renderRiskFindings(findings) {
-  if (!Array.isArray(findings) || findings.length === 0) {
-    return '<span class="muted">No findings.</span>';
-  }
-  return findings.map(f => `
-    <div class="trace-item trace-${escapeHtml(f.severity || 'unknown')}">
-      <div><strong>${escapeHtml(f.area || 'Finding')}</strong><span>${escapeHtml(f.verdict || '')} · ${escapeHtml(f.severity || '')}</span></div>
-      <p>${escapeHtml(f.description || '')}</p>
-      ${f.recommendation ? `<p class="muted">Recommendation: ${escapeHtml(f.recommendation)}</p>` : ''}
-    </div>
-  `).join('');
-}
-
-function updateRiskDownloadLinks(runId) {
-  const exts = { riskDownloadPptx: 'pptx', riskDownloadPdf: 'pdf', riskDownloadDocx: 'docx' };
-  Object.entries(exts).forEach(([id, ext]) => {
-    const link = $(id);
-    if (link) link.href = `/api/risk-validation/${encodeURIComponent(runId)}/report.${ext}`;
+function renderDocs(p) {
+  const items = [];
+  p.rounds.forEach(r => {
+    const m = r.modeler, v = r.validator;
+    if (m.document_docx) items.push([`Modelling document v${r.number}`, m.document_docx, m.document_pdf]);
+    if (v.report_docx) items.push([`Validation report, round ${r.number}`, v.report_docx, v.report_pdf]);
   });
+  $('docList').innerHTML = items.length
+    ? items.reverse().map(([label, docx, pdf]) => `<li><span>${esc(label)}</span>
+        <span class="doc-links"><a href="${fileUrl(p.project_id, docx)}">DOCX</a>${pdf ? ` <a href="${fileUrl(p.project_id, pdf)}">PDF</a>` : ''}</span></li>`).join('')
+    : '<li class="muted">Documents appear as each agent finishes.</li>';
 }
 
-function renderRiskValidationRun(data) {
-  state.riskRun = data;
-  $('riskResult').hidden = false;
-  $('riskRunId').textContent = data.run_id || 'unknown';
-
-  const trace = Array.isArray(data.trace) ? data.trace : [];
-  $('riskTrace').innerHTML = trace.map(item => `
-    <div class="trace-item trace-${escapeHtml(item.status || 'unknown')}">
-      <div><strong>${escapeHtml(item.agent || 'agent')}</strong><span>${escapeHtml(item.status || '')}</span></div>
-      <p>${escapeHtml(item.summary || '')}</p>
-    </div>
-  `).join('') || '<span class="muted">No trace returned.</span>';
-
-  $('riskFindings').innerHTML = renderRiskFindings(data.findings);
-
-  const report = data.report || {};
-  const badge = $('riskRatingBadge');
-  badge.textContent = report.overall_rating ? report.overall_rating.replace(/_/g, ' ') : 'pending';
-  badge.className = `quant-badge ${riskRatingBadgeClass(report.overall_rating)}`;
-
-  updateRiskDownloadLinks(data.run_id);
-  $('riskApprovalStatus').textContent = report.signed_off_by
-    ? `Signed off by ${report.signed_off_by} at ${report.signed_off_at}`
-    : 'Draft only. Review the findings and downloads above, then approve to sign off.';
+async function loadFiles(id) {
+  try {
+    const { files } = await api(`/api/projects/${encodeURIComponent(id)}/tree`);
+    $('fileList').innerHTML = files.map(f => `<li><a href="${fileUrl(id, f.path)}" target="_blank" rel="noopener">${esc(f.path)}</a></li>`).join('') || '<li class="muted">No files yet.</li>';
+  } catch { /* project may be gone */ }
 }
 
-async function runRiskValidation() {
-  const domain = $('riskDomain')?.value;
-  const rawInputs = $('riskInputs')?.value.trim();
-  const apiToken = $('riskApiToken')?.value;
-  if (!rawInputs) { alert('Enter a case file (JSON) for the selected domain.'); return; }
-  if (!apiToken) { alert('Enter the RISK_VALIDATION_API_TOKEN configured on the server.'); return; }
-
-  let inputs;
+async function submitSignoff() {
+  const p = state.project;
+  if (!p) return;
+  if (!requireFields([['soName', 'Enter your name.']])) return;
+  if (!token.get()) { $('signoffStatus').textContent = 'Enter the Studio API token in Settings first.'; return; }
+  if (!confirm(`Record "${$('soDecision').value}" by ${$('soName').value.trim()} for this model?`)) return;
+  const btn = $('signoffBtn'); btn.disabled = true;
   try {
-    inputs = JSON.parse(rawInputs);
-  } catch (error) {
-    alert(`Case file is not valid JSON: ${error.message}`);
-    return;
-  }
-
-  const button = $('runRiskValidationBtn');
-  const status = $('riskRunStatus');
-  button.disabled = true;
-  button.textContent = 'Running validation...';
-  status.textContent = 'Retrieving regulatory context and running the risk-validation agent team. This may take a minute.';
-  $('riskResult').hidden = true;
-  state.riskRun = null;
-
-  try {
-    const data = await fetchJson('/api/risk-validation/run', {
+    await api(`/api/projects/${encodeURIComponent(p.project_id)}/signoff`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Risk-Token': apiToken,
-      },
-      body: JSON.stringify({ domain, inputs }),
+      headers: { 'Content-Type': 'application/json', 'X-Studio-Token': token.get() },
+      body: JSON.stringify({ name: $('soName').value.trim(), role: $('soRole').value.trim(), decision: $('soDecision').value, comment: $('soComment').value.trim() }),
     });
-    renderRiskValidationRun(data);
-    status.textContent = 'Draft report ready for human validator review.';
-    addActivityItem('🏦', `Risk validation draft ready: ${(data.run_id || '').slice(0, 8)}`);
-  } catch (error) {
-    status.textContent = `Risk validation failed: ${error.message}`;
-  } finally {
-    button.disabled = false;
-    button.textContent = 'Run validation';
-  }
-}
-
-async function approveRiskValidation() {
-  const run = state.riskRun;
-  const apiToken = $('riskApiToken')?.value;
-  const signedOffBy = $('riskSignedOffBy')?.value.trim();
-  if (!run || !run.approval_token) { alert('Run a validation first.'); return; }
-  if (!apiToken) { alert('Enter the RISK_VALIDATION_API_TOKEN configured on the server.'); return; }
-  if (!signedOffBy) { alert('Enter the validator name signing off on this report.'); return; }
-
-  const button = $('approveRiskValidationBtn');
-  button.disabled = true;
-  $('riskApprovalStatus').textContent = 'Signing off and finalizing PPTX/PDF/DOCX...';
-  try {
-    const report = await fetchJson(`/api/risk-validation/${encodeURIComponent(run.run_id)}/approve`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Risk-Token': apiToken,
-      },
-      body: JSON.stringify({ approval_token: run.approval_token, signed_off_by: signedOffBy }),
-    });
-    run.report = report;
-    run.approval_token = null;
-    $('riskApprovalStatus').textContent = `Signed off by ${report.signed_off_by} at ${report.signed_off_at}. Final files are ready for download above.`;
-    addActivityItem('✅', `Risk validation signed off: ${(run.run_id || '').slice(0, 8)}`);
-  } catch (error) {
-    $('riskApprovalStatus').textContent = `Sign-off failed: ${error.message}`;
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function ingestDocuments() {
-  const path = $('ingestPath')?.value.trim();
-  if (!path) { alert('Please enter a document path'); return; }
-  const out = $('ingestOutput');
-  if (out) out.textContent = 'Ingesting documents...';
-  try {
-    const result = await fetchJson('/ingest', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path }),
-    });
-    if (out) out.textContent = `Done!\nTotal chunks: ${result.chunks}\nAdded: ${result.added}`;
-    addActivityItem('📚', `Ingested ${result.added} chunks from ${path}`);
+    $('signoffStatus').textContent = 'Recorded. The validation report now shows the sign-off.';
+    $('signoffForm').reset();
+    refreshProject(p.project_id);
   } catch (e) {
-    if (out) out.textContent = `Failed: ${e.message}`;
+    $('signoffStatus').textContent = `Not recorded: ${e.message}`;
+  } finally { btn.disabled = false; }
+}
+
+// ── Library ──────────────────────────────────────────────────────────────────
+async function loadLibrary() {
+  const body = $('libraryRows');
+  try {
+    const { documents } = await api('/api/library');
+    body.innerHTML = documents.map(d => `<tr>
+      <td>${esc(d.title)}${d.builtin ? ' <span class="muted">(built-in summary)</span>' : ''}</td>
+      <td>${esc(d.kind.replace('_', ' '))}</td><td>${esc(d.framework || '')}</td>
+      <td class="num">${d.chunks}</td><td class="num">${d.projects} project${d.projects === 1 ? '' : 's'}</td></tr>`).join('')
+      || '<tr><td colspan="5" class="empty">The library is empty.</td></tr>';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">Could not load the library: ${esc(e.message)}</td></tr>`;
+  }
+}
+async function addToLibrary() {
+  if (!requireFields([['libFiles', 'Choose at least one file.', el => el.files.length > 0]])) return;
+  if (!token.get()) { $('libStatus').textContent = 'Enter the Studio API token in Settings first.'; return; }
+  const fd = new FormData();
+  fd.append('kind', $('libKind').value);
+  Array.from($('libFiles').files).forEach(f => fd.append('files', f));
+  $('libBtn').disabled = true; $('libStatus').textContent = 'Indexing documents.';
+  try {
+    const r = await api('/api/library', { method: 'POST', body: fd, headers: { 'X-Studio-Token': token.get() } });
+    $('libStatus').textContent = `Added ${r.added.length} document${r.added.length === 1 ? '' : 's'}.`;
+    $('libraryForm').reset(); loadLibrary();
+  } catch (e) {
+    $('libStatus').textContent = `Could not add: ${e.message}`;
+  } finally { $('libBtn').disabled = false; }
+}
+
+// ── Health ───────────────────────────────────────────────────────────────────
+async function checkHealth(verbose) {
+  try {
+    const h = await api('/health');
+    const ok = h.status === 'ok';
+    $('statusIndicator').classList.toggle('active', ok);
+    $('statusIndicator').classList.toggle('error', !ok);
+    $('statusText').textContent = ok ? 'Agents ready' : 'Model provider unavailable';
+    if (verbose) $('healthStatus').textContent = ok
+      ? `Healthy. ${h.provider} model ${h.model}. ${h.token_configured ? 'API token is configured.' : 'STUDIO_API_TOKEN is not set on the server, so projects cannot be started.'}`
+      : `Not healthy: ${h.detail || 'the OpenAI API did not respond or the key is missing'}.`;
+  } catch (e) {
+    $('statusIndicator').classList.add('error');
+    $('statusText').textContent = 'Server unreachable';
+    if (verbose) $('healthStatus').textContent = e.message;
   }
 }
 
-// ── Event listeners ────────────────────────────────────────────────────────────
+// ── Wiring ───────────────────────────────────────────────────────────────────
+function init() {
+  setTheme(prefs.get('theme') || 'light');
+  if (prefs.get('sidebarCollapsed') === 'true') toggleSidebar();
+  $('pToken').value = token.get();
+  $('settingsToken').value = token.get();
 
-function setupEventListeners() {
-  $('sidebarToggle')?.addEventListener('click', toggleSidebar);
-  $('mobileMenuBtn')?.addEventListener('click', () => $('sidebar').classList.toggle('mobile-open'));
-
-  document.querySelectorAll('.nav-item').forEach(item => {
-    item.addEventListener('click', () => {
-      showSection(item.dataset.section);
-      $('sidebar').classList.remove('mobile-open');
-    });
+  $('sidebarToggle').addEventListener('click', toggleSidebar);
+  $('mobileMenuBtn').addEventListener('click', () => setMobileMenu(!$('sidebar').classList.contains('mobile-open')));
+  document.addEventListener('click', e => {
+    if ($('sidebar').classList.contains('mobile-open') && !$('sidebar').contains(e.target) && !$('mobileMenuBtn').contains(e.target)) setMobileMenu(false);
   });
+  $('themeToggle').addEventListener('click', () => setTheme((state.theme === 'dark' || (state.theme === 'auto' && prefersDark())) ? 'light' : 'dark'));
+  $('themeSelect').addEventListener('change', e => setTheme(e.target.value));
+  $('settingsToken').addEventListener('change', e => { token.set(e.target.value.trim()); $('pToken').value = token.get(); });
+  $('forgetToken').addEventListener('click', () => { token.set(''); $('settingsToken').value = ''; $('pToken').value = ''; });
+  $('healthCheckBtn').addEventListener('click', () => { $('healthStatus').textContent = 'Checking.'; checkHealth(true); });
 
-  $('themeToggle')?.addEventListener('click', () => setTheme(state.theme === 'dark' ? 'light' : 'dark'));
-  $('themeSelect')?.addEventListener('change', e => setTheme(e.target.value));
+  document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', updateModeFields));
+  $('projectForm').addEventListener('submit', e => { e.preventDefault(); createProject(); });
+  $('signoffForm').addEventListener('submit', e => { e.preventDefault(); submitSignoff(); });
+  $('libraryForm').addEventListener('submit', e => { e.preventDefault(); addToLibrary(); });
+  document.querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => {
+    state.findingFilter = b.dataset.filter;
+    document.querySelectorAll('.seg-btn').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    if (state.project) renderFindings(state.project);
+  }));
+  document.querySelectorAll('input[required], textarea[required]').forEach(el =>
+    el.addEventListener('input', () => setError(el.id, '')));
 
-  // Chat
-  $('newChatBtn')?.addEventListener('click', startNewChat);
-
-  const chatInput = $('chatInput');
-  if (chatInput) {
-    chatInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-      }
-    });
-    chatInput.addEventListener('input', () => {
-      chatInput.style.height = 'auto';
-      chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + 'px';
-    });
-  }
-
-  // Data
-  $('ingestBtn')?.addEventListener('click', ingestDocuments);
-
-  // Quant team
-  $('runQuantBtn')?.addEventListener('click', runQuantTeam);
-  $('executeQuantBtn')?.addEventListener('click', executeQuantOrder);
-
-  // Risk validation
-  $('runRiskValidationBtn')?.addEventListener('click', runRiskValidation);
-  $('approveRiskValidationBtn')?.addEventListener('click', approveRiskValidation);
-
-  // Reports
-  $('refreshReportsBtn')?.addEventListener('click', loadReports);
-
-  // Settings
-  $('healthCheckBtn')?.addEventListener('click', async () => {
-    const hs = $('healthStatus');
-    if (hs) hs.textContent = 'Checking...';
-    await loadSystemHealth();
-    if (hs) {
-      const health = state.systemHealth || {};
-      hs.textContent = health.status === 'ok'
-        ? `Healthy — ${health.provider || 'hosted'} / ${health.model || 'configured model'}`
-        : `System has issues — ${health.provider || 'hosted inference'}`;
-    }
-  });
-
-  // Keyboard shortcuts
   document.addEventListener('keydown', e => {
-    if (e.ctrlKey || e.metaKey) {
-      const map = { '1': 'dashboard', '2': 'tasks', '3': 'quant', '4': 'reports', '5': 'data', '6': 'settings' };
-      if (map[e.key]) { e.preventDefault(); showSection(map[e.key]); }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && /^[1-5]$/.test(e.key)) {
+      e.preventDefault(); location.hash = `#${SECTIONS[Number(e.key) - 1]}`;
     }
+    if (e.key === 'Escape') setMobileMenu(false);
   });
+  window.addEventListener('hashchange', () => { route(); $('main').focus({ preventScroll: true }); });
+
+  updateModeFields();
+  loadFrameworks();
+  route();
+  checkHealth(false);
 }
 
-// ── Init ───────────────────────────────────────────────────────────────────────
-
-async function init() {
-  const savedTheme = localStorage.getItem('theme') || 'light';
-  const savedSection = localStorage.getItem('currentSection') || 'dashboard';
-  const savedCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
-
-  setTheme(savedTheme);
-  const ts = $('themeSelect');
-  if (ts) ts.value = savedTheme;
-  if (savedCollapsed) toggleSidebar();
-
-  setupEventListeners();
-  showSection(savedSection);
-
-  await Promise.all([loadSystemHealth(), loadConversationList(), loadDashboardStats(), loadReports()]);
-  addActivityItem('🚀', 'Quant Research Agents ready');
-}
-
-// Global helpers for inline onclick attributes
-window.setInput = setInput;
-window.sendMessage = sendMessage;
-window.openConversation = openConversation;
-window.approveSelectedSources = approveSelectedSources;
-
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
-} else {
-  init();
-}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

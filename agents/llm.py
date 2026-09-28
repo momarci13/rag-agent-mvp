@@ -132,6 +132,7 @@ class HostedLLM:
         *,
         temperature: float | None = None,
         json_mode: bool = False,
+        response_schema: dict[str, Any] | None = None,
         stop: list[str] | None = None,
         role: str | None = None,
     ) -> str:
@@ -149,6 +150,7 @@ class HostedLLM:
                     messages,
                     temperature=temperature,
                     json_mode=json_mode,
+                    response_schema=response_schema,
                     stop=stop,
                     model=model_spec.name,
                     timeout_s=timeout,
@@ -166,12 +168,20 @@ class HostedLLM:
         *,
         temperature: float | None = None,
         json_mode: bool = False,
+        response_schema: dict[str, Any] | None = None,
         stop: list[str] | None = None,
         model: str | None = None,
         role: str | None = None,
         timeout_s: int | None = None,
     ) -> str:
-        """Send one non-streaming chat-completions request."""
+        """Send one non-streaming chat-completions request.
+
+        ``response_schema``, when given a JSON Schema dict, requests OpenAI's
+        strict structured-outputs mode instead of the looser ``json_object``
+        mode (which ``json_mode=True`` alone requests). Use
+        :func:`make_strict_json_schema` to prepare a Pydantic-derived schema
+        for strict mode first.
+        """
 
         selected_model = model or self._model_for_role(role) or self.cfg.model
         request_kwargs: dict[str, Any] = {
@@ -183,7 +193,12 @@ class HostedLLM:
         }
         if stop:
             request_kwargs["stop"] = stop
-        if json_mode:
+        if response_schema is not None:
+            request_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": response_schema, "strict": True},
+            }
+        elif json_mode:
             request_kwargs["response_format"] = {"type": "json_object"}
 
         response = self._client.chat.completions.create(**request_kwargs)
@@ -203,15 +218,32 @@ class HostedLLM:
         max_retries: int = 2,
         task_complexity: str | None = None,
         role: str | None = None,
+        strict: bool = False,
     ) -> dict[str, Any]:
-        """Request and validate a JSON object with bounded retries."""
+        """Request and validate a JSON object with bounded retries.
+
+        ``strict=True`` additionally requests OpenAI's strict structured
+        outputs mode using ``schema_hint`` (expected to be
+        ``json.dumps(SomeModel.model_json_schema())``) as the schema, cutting
+        down on malformed-JSON retries for schemas without optional-field
+        constraints the strict-mode transform can't express (e.g.
+        ``Field(min_length=...)``, which Pydantic's own ``model_validate``
+        below still enforces regardless of this flag). Falls back to loose
+        ``json_object`` mode if ``schema_hint`` isn't valid JSON.
+        """
 
         request_messages = list(messages)
+        response_schema: dict[str, Any] | None = None
         if schema_hint:
             request_messages.append({
                 "role": "system",
                 "content": f"Respond with JSON only. Schema hint:\n{schema_hint}",
             })
+            if strict:
+                try:
+                    response_schema = make_strict_json_schema(json.loads(schema_hint))
+                except (json.JSONDecodeError, TypeError):
+                    response_schema = None
         if task_complexity is None:
             user_text = next(
                 (str(m.get("content", "")) for m in reversed(request_messages) if m.get("role") == "user"),
@@ -227,6 +259,7 @@ class HostedLLM:
                     task_complexity,
                     temperature=temperature,
                     json_mode=True,
+                    response_schema=response_schema,
                     role=role,
                 )
                 parsed = json.loads(_strip_json_fence(text))
@@ -264,6 +297,37 @@ class HostedLLM:
         if words < 10:
             return "simple"
         return "medium"
+
+
+def make_strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a JSON Schema (as produced by Pydantic's ``model_json_schema()``)
+    to satisfy OpenAI's strict structured-outputs mode: every object must set
+    ``additionalProperties: false`` and list every property as required
+    (Pydantic already expresses optional fields as nullable ``anyOf`` unions,
+    which strict mode accepts as long as they're also marked required).
+    Provider-neutral -- operates on any JSON Schema dict, not just risk
+    schemas, so this stays in the shared LLM client rather than a domain module.
+    """
+    schema = dict(schema)
+    defs = schema.get("$defs")
+    if isinstance(defs, dict):
+        schema["$defs"] = {name: make_strict_json_schema(sub) for name, sub in defs.items()}
+    if schema.get("type") == "object" and isinstance(schema.get("properties"), dict):
+        schema["properties"] = {
+            key: make_strict_json_schema(value) if isinstance(value, dict) else value
+            for key, value in schema["properties"].items()
+        }
+        schema["additionalProperties"] = False
+        schema["required"] = list(schema["properties"].keys())
+    if isinstance(schema.get("items"), dict):
+        schema["items"] = make_strict_json_schema(schema["items"])
+    for key in ("anyOf", "allOf", "oneOf"):
+        if isinstance(schema.get(key), list):
+            schema[key] = [
+                make_strict_json_schema(item) if isinstance(item, dict) else item
+                for item in schema[key]
+            ]
+    return schema
 
 
 def _strip_json_fence(text: str) -> str:

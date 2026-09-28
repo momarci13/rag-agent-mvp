@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quant Research + IBKR RAG Agents</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-dark.min.css" id="prism-theme">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-latex.min.js"></script>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <h2>Quant Research Agents</h2>
+      <button id="sidebarToggle" class="sidebar-toggle">☰</button>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="#dashboard" class="nav-item active" data-section="dashboard">
+        <span class="nav-icon">📊</span>
+        <span class="nav-text">Dashboard</span>
+      </a>
+      <a href="#tasks" class="nav-item" data-section="tasks">
+        <span class="nav-icon">💬</span>
+        <span class="nav-text">Chat</span>
+      </a>
+      <a href="#quant" class="nav-item" data-section="quant">
+        <span class="nav-icon">🧠</span>
+        <span class="nav-text">Quant Team</span>
+      </a>
+      <a href="#risk-validation" class="nav-item" data-section="risk-validation">
+        <span class="nav-icon">🏦</span>
+        <span class="nav-text">Risk Validation</span>
+      </a>
+      <a href="#reports" class="nav-item" data-section="reports">
+        <span class="nav-icon">📄</span>
+        <span class="nav-text">Reports</span>
+      </a>
+      <a href="#data" class="nav-item" data-section="data">
+        <span class="nav-icon">📈</span>
+        <span class="nav-text">Data</span>
+      </a>
+      <a href="#settings" class="nav-item" data-section="settings">
+        <span class="nav-icon">⚙️</span>
+        <span class="nav-text">Settings</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="system-status">
+        <div class="status-indicator" id="statusIndicator"></div>
+        <span>System Status</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <button id="mobileMenuBtn" class="mobile-menu-btn">☰</button>
+        <h1 id="pageTitle">Dashboard</h1>
+      </div>
+      <div class="header-right">
+        <button id="themeToggle" class="theme-toggle">🌙</button>
+        <div class="user-menu">
+          <button id="userMenuBtn" class="user-menu-btn">👤</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Content Area -->
+    <div class="content-area">
+      <!-- Dashboard Section -->
+      <section id="dashboard-section" class="section active">
+        <div class="section-header">
+          <h2>Dashboard Overview</h2>
+          <p>Monitor system status and recent activity</p>
+        </div>
+
+        <div class="dashboard-grid">
+          <div class="metric-card">
+            <h3>Total Runs</h3>
+            <div class="metric-value" id="totalRuns">0</div>
+          </div>
+          <div class="metric-card">
+            <h3>Active Tasks</h3>
+            <div class="metric-value" id="activeTasks">0</div>
+          </div>
+          <div class="metric-card">
+            <h3>Reports Generated</h3>
+            <div class="metric-value" id="totalReports">0</div>
+          </div>
+          <div class="metric-card">
+            <h3>System Health</h3>
+            <div class="metric-value" id="systemHealth">Checking...</div>
+          </div>
+        </div>
+
+        <div class="recent-activity">
+          <h3>Recent Activity</h3>
+          <div id="activityFeed" class="activity-feed">
+            <div class="activity-item">
+              <div class="activity-icon">🔄</div>
+              <div class="activity-content">
+                <div class="activity-title">System initialized</div>
+                <div class="activity-time">Just now</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Chat Section -->
+      <section id="tasks-section" class="section chat-section">
+        <div class="chat-layout">
+
+          <!-- Left: conversation list -->
+          <div class="chat-sidebar-panel">
+            <div class="chat-sidebar-header">
+              <span class="chat-sidebar-title">Conversations</span>
+              <button id="newChatBtn" class="btn-new-chat" title="Start new conversation">+</button>
+            </div>
+            <div id="conversationList" class="conversation-list">
+              <div class="conv-placeholder">No conversations yet</div>
+            </div>
+          </div>
+
+          <!-- Right: thread + input -->
+          <div class="chat-main">
+            <div class="chat-header-bar">
+              <span id="chatTitle" class="chat-title-text">New Conversation</span>
+            </div>
+
+            <div id="chatThread" class="chat-thread">
+              <div class="chat-welcome" id="chatWelcome">
+                <div class="welcome-icon">⚡</div>
+                <h3>Start a research task</h3>
+                <p>Ask anything — financial models, trading strategies, ML experiments, academic writing.</p>
+                <div class="welcome-examples">
+                  <button class="example-chip" onclick="setInput('Backtest a 50/200 SMA crossover on SPY, QQQ, IWM')">SMA crossover backtest</button>
+                  <button class="example-chip" onclick="setInput('Compute the volatility of SPY over 2020-2024 with bootstrap CIs')">SPY volatility analysis</button>
+                  <button class="example-chip" onclick="setInput('Build an LSTM model to forecast AAPL weekly returns')">LSTM return forecast</button>
+                  <button class="example-chip" onclick="setInput('Write a 3-page report on momentum factor anomalies')">Momentum factor report</button>
+                  <button class="example-chip" onclick="setInput('Implement a C++ order book with microsecond latency benchmark')">C++ HFT order book</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="chat-input-bar">
+              <textarea id="chatInput" class="chat-textarea" placeholder="Describe your analysis task or ask a follow-up question..." rows="2"></textarea>
+              <button id="sendBtn" class="btn-send" onclick="sendMessage()">
+                <span id="sendBtnText">Send</span>
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Quant Team Section -->
+      <section id="quant-section" class="section">
+        <div class="section-header">
+          <h2>Quant Research + IBKR Agent Team</h2>
+          <p>RAG evidence → hosted free-model research → model/backtest → risk gates → paper-order approval</p>
+        </div>
+
+        <div class="quant-run-card">
+          <label for="quantTask">Research objective</label>
+          <textarea id="quantTask" rows="4" placeholder="Research a conservative SPY momentum strategy with walk-forward validation"></textarea>
+
+          <div class="quant-auth-row">
+            <div>
+              <label for="traderApiToken">Trading API token</label>
+              <input id="traderApiToken" type="password" autocomplete="off" placeholder="TRADER_API_TOKEN" />
+              <small>Used for this request only; it is not saved by the browser.</small>
+            </div>
+            <button id="runQuantBtn" class="btn-primary">Run agent team</button>
+          </div>
+          <div id="quantRunStatus" class="quant-status">Ready. Running the team never submits an order.</div>
+        </div>
+
+        <div id="quantResult" class="quant-result" hidden>
+          <div class="quant-result-header">
+            <div>
+              <span class="quant-label">Run</span>
+              <strong id="quantRunId"></strong>
+            </div>
+            <span id="quantDecisionBadge" class="quant-badge"></span>
+          </div>
+
+          <div class="quant-grid">
+            <article class="quant-panel">
+              <h3>Agent trace</h3>
+              <div id="quantTrace" class="agent-trace"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Grounded research</h3>
+              <div id="quantResearch"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Strategy + backtest</h3>
+              <div id="quantStrategy"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Risk + IBKR preview</h3>
+              <div id="quantRisk"></div>
+              <button id="executeQuantBtn" class="btn-danger" hidden>Approve exact paper order</button>
+              <div id="quantExecutionStatus" class="quant-execution-status"></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Risk Validation Section -->
+      <section id="risk-validation-section" class="section">
+        <div class="section-header">
+          <h2>Bank Risk Validation Agent Team</h2>
+          <p>Credit / non-credit / model risk validation — DRAFT reports for human validator review, not a regulatory submission</p>
+        </div>
+
+        <div class="quant-run-card">
+          <div class="risk-disclaimer">
+            ⚠️ Draft-and-support tool only. Regulatory references and thresholds are placeholder/illustrative
+            and have not been verified against ECB/EBA/MNB source documents. Nothing here may be submitted
+            to a regulator without human validator sign-off.
+          </div>
+
+          <label for="riskDomain">Validation domain</label>
+          <select id="riskDomain">
+            <option value="credit_risk">Credit risk</option>
+            <option value="non_credit_risk">Non-credit risk (market / operational / liquidity)</option>
+            <option value="model_risk">Model risk</option>
+          </select>
+
+          <!-- Credit risk form -->
+          <div id="creditRiskForm" class="risk-domain-form">
+            <div class="risk-form-grid">
+              <div><label for="cr_model_id">Model ID *</label><input id="cr_model_id" placeholder="PD-RETAIL-01" /></div>
+              <div><label for="cr_model_type">Model type *</label>
+                <select id="cr_model_type">
+                  <option value="PD">PD</option><option value="LGD">LGD</option><option value="EAD">EAD</option>
+                  <option value="rating_scorecard">Rating scorecard</option><option value="IFRS9_ECL">IFRS9 ECL</option>
+                </select>
+              </div>
+              <div><label for="cr_exposure_class">Exposure class *</label>
+                <select id="cr_exposure_class">
+                  <option value="retail">Retail</option><option value="corporate">Corporate</option>
+                  <option value="institutions">Institutions</option><option value="sovereign">Sovereign</option>
+                  <option value="equity">Equity</option><option value="securitisation">Securitisation</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div><label for="cr_portfolio_segment">Portfolio segment *</label><input id="cr_portfolio_segment" placeholder="mortgages" /></div>
+              <div><label for="cr_estimation_approach">Estimation approach *</label>
+                <select id="cr_estimation_approach">
+                  <option value="internal_ratings_based">Internal ratings-based</option>
+                  <option value="standardised">Standardised</option><option value="hybrid">Hybrid</option>
+                </select>
+              </div>
+              <div><label for="cr_jurisdiction">Jurisdiction</label><input id="cr_jurisdiction" value="EU" /></div>
+              <div><label for="cr_last_recalibration_date">Last recalibration date</label><input id="cr_last_recalibration_date" type="date" /></div>
+              <div><label for="cr_psi">Population Stability Index</label><input id="cr_psi" type="number" step="0.01" /></div>
+              <div><label for="cr_gini">Gini coefficient</label><input id="cr_gini" type="number" step="0.01" /></div>
+              <div><label for="cr_ks">KS statistic</label><input id="cr_ks" type="number" step="0.01" /></div>
+              <div><label for="cr_bt_exceptions">Backtesting exceptions</label><input id="cr_bt_exceptions" type="number" /></div>
+              <div><label for="cr_bt_observations">Backtesting observations</label><input id="cr_bt_observations" type="number" /></div>
+              <div><label for="cr_override_rate">Override rate %</label><input id="cr_override_rate" type="number" step="0.01" /></div>
+              <div><label for="cr_concentration">Single-name concentration %</label><input id="cr_concentration" type="number" step="0.01" /></div>
+              <div><label for="cr_ifrs9_stage">IFRS9 stage</label>
+                <select id="cr_ifrs9_stage">
+                  <option value="">n/a</option><option value="stage_1">Stage 1</option>
+                  <option value="stage_2">Stage 2</option><option value="stage_3">Stage 3</option>
+                </select>
+              </div>
+              <div><label for="cr_sicr_trigger">SICR trigger fired</label>
+                <select id="cr_sicr_trigger"><option value="">n/a</option><option value="true">Yes</option><option value="false">No</option></select>
+              </div>
+              <div><label for="cr_days_past_due">Days past due</label><input id="cr_days_past_due" type="number" /></div>
+            </div>
+          </div>
+
+          <!-- Non-credit risk form -->
+          <div id="nonCreditRiskForm" class="risk-domain-form" hidden>
+            <div class="risk-form-grid">
+              <div><label for="nc_risk_type">Risk type *</label>
+                <select id="nc_risk_type">
+                  <option value="market">Market</option><option value="operational">Operational</option>
+                  <option value="liquidity">Liquidity</option>
+                </select>
+              </div>
+              <div><label for="nc_business_unit">Business unit *</label><input id="nc_business_unit" placeholder="Trading Desk" /></div>
+              <div><label for="nc_reporting_date">Reporting date *</label><input id="nc_reporting_date" type="date" /></div>
+              <div><label for="nc_jurisdiction">Jurisdiction</label><input id="nc_jurisdiction" value="EU" /></div>
+            </div>
+
+            <div id="nc_marketFields" class="risk-form-grid">
+              <h4>Market risk metrics</h4>
+              <div><label for="nc_var_confidence">VaR confidence level</label><input id="nc_var_confidence" type="number" step="0.01" value="0.99" /></div>
+              <div><label for="nc_var_horizon">VaR horizon (days)</label><input id="nc_var_horizon" type="number" value="1" /></div>
+              <div><label for="nc_var_exceptions">VaR backtesting exceptions</label><input id="nc_var_exceptions" type="number" /></div>
+              <div><label for="nc_var_observations">VaR backtesting observations</label><input id="nc_var_observations" type="number" /></div>
+              <div><label for="nc_stressed_var">Stressed VaR</label><input id="nc_stressed_var" type="number" step="0.01" /></div>
+            </div>
+
+            <div id="nc_operationalFields" class="risk-form-grid" hidden>
+              <h4>Operational risk metrics</h4>
+              <div><label for="nc_loss_event_count">Loss event count</label><input id="nc_loss_event_count" type="number" /></div>
+              <div><label for="nc_gross_loss">Gross loss amount</label><input id="nc_gross_loss" type="number" step="0.01" /></div>
+              <div><label for="nc_recovery">Recovery amount</label><input id="nc_recovery" type="number" step="0.01" value="0" /></div>
+              <div><label for="nc_event_category">Event category</label><input id="nc_event_category" placeholder="internal_fraud" /></div>
+              <div><label for="nc_control_effectiveness">Control effectiveness</label>
+                <select id="nc_control_effectiveness">
+                  <option value="">n/a</option><option value="effective">Effective</option>
+                  <option value="partially_effective">Partially effective</option><option value="ineffective">Ineffective</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="nc_liquidityFields" class="risk-form-grid" hidden>
+              <h4>Liquidity risk metrics</h4>
+              <div><label for="nc_lcr">LCR %</label><input id="nc_lcr" type="number" step="0.01" /></div>
+              <div><label for="nc_nsfr">NSFR %</label><input id="nc_nsfr" type="number" step="0.01" /></div>
+              <div><label for="nc_survival_horizon">Survival horizon (days)</label><input id="nc_survival_horizon" type="number" /></div>
+              <div><label for="nc_funding_concentration">Funding concentration %</label><input id="nc_funding_concentration" type="number" step="0.01" /></div>
+            </div>
+          </div>
+
+          <!-- Model risk form -->
+          <div id="modelRiskForm" class="risk-domain-form" hidden>
+            <div class="risk-form-grid">
+              <div><label for="mr_model_id">Model ID *</label><input id="mr_model_id" placeholder="M1" /></div>
+              <div><label for="mr_model_name">Model name *</label><input id="mr_model_name" placeholder="IFRS9 ECL Retail" /></div>
+              <div><label for="mr_model_tier">Model tier *</label>
+                <select id="mr_model_tier">
+                  <option value="tier_1_high_materiality">Tier 1 (high materiality)</option>
+                  <option value="tier_2_medium_materiality">Tier 2 (medium materiality)</option>
+                  <option value="tier_3_low_materiality">Tier 3 (low materiality)</option>
+                </select>
+              </div>
+              <div><label for="mr_model_owner">Model owner *</label><input id="mr_model_owner" placeholder="Credit Risk" /></div>
+              <div><label for="mr_jurisdiction">Jurisdiction</label><input id="mr_jurisdiction" value="EU" /></div>
+              <div><label for="mr_psi">PSI</label><input id="mr_psi" type="number" step="0.01" /></div>
+              <div><label for="mr_gini">Gini</label><input id="mr_gini" type="number" step="0.01" /></div>
+              <div><label for="mr_ks">KS statistic</label><input id="mr_ks" type="number" step="0.01" /></div>
+              <div><label for="mr_last_validation_date">Last validation date</label><input id="mr_last_validation_date" type="date" /></div>
+              <div><label for="mr_next_validation_date">Next scheduled validation date</label><input id="mr_next_validation_date" type="date" /></div>
+            </div>
+            <label for="mr_activities">Validation activities performed (comma-separated)</label>
+            <input id="mr_activities" placeholder="conceptual_soundness_review, stability_testing, benchmarking" />
+            <label for="mr_benchmarking_results">Benchmarking results</label>
+            <textarea id="mr_benchmarking_results" rows="2"></textarea>
+          </div>
+
+          <div class="quant-auth-row">
+            <div>
+              <label for="riskApiToken">Risk Validation API token</label>
+              <input id="riskApiToken" type="password" autocomplete="off" placeholder="RISK_VALIDATION_API_TOKEN" />
+              <small>Used for this request only; it is not saved by the browser.</small>
+            </div>
+            <button id="runRiskValidationBtn" class="btn-primary">Run validation</button>
+          </div>
+          <div id="riskRunStatus" class="quant-status">Ready. Produces a draft report only.</div>
+        </div>
+
+        <div id="riskResult" class="quant-result" hidden>
+          <div class="quant-result-header">
+            <div>
+              <span class="quant-label">Run</span>
+              <strong id="riskRunId"></strong>
+            </div>
+            <span id="riskRatingBadge" class="quant-badge"></span>
+          </div>
+
+          <div class="quant-grid">
+            <article class="quant-panel">
+              <h3>Agent trace</h3>
+              <div id="riskTrace" class="agent-trace"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Findings</h3>
+              <div id="riskFindings"></div>
+            </article>
+            <article class="quant-panel">
+              <h3>Draft downloads</h3>
+              <div class="risk-downloads">
+                <a id="riskDownloadPptx" class="btn-secondary" href="#" target="_blank">PPTX</a>
+                <a id="riskDownloadPdf" class="btn-secondary" href="#" target="_blank">PDF</a>
+                <a id="riskDownloadDocx" class="btn-secondary" href="#" target="_blank">DOCX</a>
+              </div>
+              <small>Draft downloads are watermarked "DRAFT" and carry no sign-off until approved below.</small>
+            </article>
+            <article class="quant-panel">
+              <h3>Approve & sign off</h3>
+              <label for="riskSignedOffBy">Validator name</label>
+              <input id="riskSignedOffBy" type="text" placeholder="Jane Validator" />
+              <label for="riskSignoffRole">Role (optional)</label>
+              <input id="riskSignoffRole" type="text" placeholder="preparer / reviewer" />
+              <button id="approveRiskValidationBtn" class="btn-danger">Approve & sign off</button>
+              <div id="riskApprovalStatus" class="quant-execution-status"></div>
+            </article>
+          </div>
+        </div>
+
+        <div class="quant-run-card">
+          <h3>Validation history</h3>
+          <div class="quant-auth-row">
+            <div>
+              <label for="riskHistoryEntity">Entity under review</label>
+              <input id="riskHistoryEntity" placeholder="PD-RETAIL-01 (mortgages)" />
+            </div>
+            <div>
+              <label for="riskHistoryDomain">Domain</label>
+              <select id="riskHistoryDomain">
+                <option value="credit_risk">Credit risk</option>
+                <option value="non_credit_risk">Non-credit risk</option>
+                <option value="model_risk">Model risk</option>
+              </select>
+            </div>
+            <button id="loadRiskHistoryBtn" class="btn-secondary">Load history</button>
+          </div>
+          <div id="riskHistoryPanel"></div>
+        </div>
+
+        <div class="quant-run-card">
+          <h3>Executive rollup</h3>
+          <p class="muted">Aggregate multiple validation runs into one summary deck for a risk committee.</p>
+          <div class="quant-auth-row">
+            <div>
+              <label for="riskRollupDomain">Domain filter (optional)</label>
+              <select id="riskRollupDomain">
+                <option value="">All domains</option>
+                <option value="credit_risk">Credit risk</option>
+                <option value="non_credit_risk">Non-credit risk</option>
+                <option value="model_risk">Model risk</option>
+              </select>
+            </div>
+            <div>
+              <label for="riskRollupSince">Since (optional)</label>
+              <input id="riskRollupSince" type="date" />
+            </div>
+            <button id="generateRiskRollupBtn" class="btn-secondary">Generate rollup deck</button>
+          </div>
+          <div id="riskRollupStatus" class="quant-status"></div>
+        </div>
+      </section>
+
+      <!-- Reports Section -->
+      <section id="reports-section" class="section">
+        <div class="section-header">
+          <h2>Report Viewer</h2>
+          <p>View generated reports and analysis outputs</p>
+        </div>
+
+        <div class="reports-controls">
+          <div class="reports-filters">
+            <select id="reportTypeFilter">
+              <option value="all">All Reports</option>
+              <option value="latex">LaTeX Reports</option>
+              <option value="data">Data Files</option>
+              <option value="plots">Plots</option>
+            </select>
+            <input type="text" id="reportSearch" placeholder="Search reports...">
+          </div>
+          <button id="refreshReportsBtn" class="btn-secondary">Refresh</button>
+        </div>
+
+        <div class="reports-grid">
+          <div class="reports-list">
+            <h3>Available Reports</h3>
+            <div id="reportsList" class="file-list">
+              <!-- Report files will be listed here -->
+            </div>
+          </div>
+          <div class="report-viewer">
+            <div id="reportViewer" class="viewer-content">
+              <div class="viewer-placeholder">
+                <div class="placeholder-icon">📄</div>
+                <div class="placeholder-text">Select a report to view</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Data Section -->
+      <section id="data-section" class="section">
+        <div class="section-header">
+          <h2>Data Management</h2>
+          <p>Configure data sources and manage ingestion</p>
+        </div>
+
+        <div class="data-sources">
+          <h3>Data Sources</h3>
+          <div class="source-grid">
+            <div class="source-card">
+              <h4>Yahoo Finance</h4>
+              <p>Stock price data</p>
+              <div class="source-status status-active">Active</div>
+            </div>
+            <div class="source-card">
+              <h4>FRED</h4>
+              <p>Federal Reserve macro data</p>
+              <div class="source-status status-active">Active</div>
+            </div>
+            <div class="source-card">
+              <h4>Ken French</h4>
+              <p>Factor portfolios (FF3, FF5, Mom)</p>
+              <div class="source-status status-active">Active</div>
+            </div>
+            <div class="source-card">
+              <h4>OpenAlex</h4>
+              <p>250M+ academic works</p>
+              <div class="source-status status-active">Active</div>
+            </div>
+            <div class="source-card">
+              <h4>KSH (Hungary)</h4>
+              <p>Economic indicators</p>
+              <div class="source-status status-inactive">Not Implemented</div>
+            </div>
+            <div class="source-card">
+              <h4>MNB (Hungary)</h4>
+              <p>Financial data</p>
+              <div class="source-status status-inactive">Not Implemented</div>
+            </div>
+            <div class="source-card">
+              <h4>Eurostat</h4>
+              <p>European statistics</p>
+              <div class="source-status status-inactive">Not Implemented</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="ingestion-controls">
+          <h3>Document Ingestion</h3>
+          <div class="ingest-form">
+            <input id="ingestPath" type="text" placeholder="Path to file or folder, e.g. data/papers/" />
+            <button id="ingestBtn" class="btn-primary">Ingest</button>
+          </div>
+          <div class="ingest-output">
+            <pre id="ingestOutput">Ready to ingest documents...</pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings Section -->
+      <section id="settings-section" class="section">
+        <div class="section-header">
+          <h2>Settings</h2>
+          <p>Configure system preferences and options</p>
+        </div>
+
+        <div class="settings-grid">
+          <div class="settings-group">
+            <h3>Appearance</h3>
+            <div class="setting-item">
+              <label for="themeSelect">Theme</label>
+              <select id="themeSelect">
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+                <option value="auto">Auto</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h3>System</h3>
+            <p class="setting-note">Inference is hosted by OpenRouter. The default chat and embedding routes are free.</p>
+            <div class="setting-item">
+              <button id="healthCheckBtn" class="btn-secondary">Run Health Check</button>
+              <div id="healthStatus" class="health-status">Click to check system health</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Modals and Overlays -->
+  <div id="modalOverlay" class="modal-overlay"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

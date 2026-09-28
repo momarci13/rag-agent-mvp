@@ -3,7 +3,7 @@ expected content, using python-pptx's own read API to inspect it."""
 
 from pptx import Presentation
 
-from agents.risk_schemas import ValidationFinding, ValidationReport
+from agents.risk_schemas import SignoffRecord, ValidationFinding, ValidationReport
 from tools.pptx_report import DISCLAIMER_BANNER, ValidationDeckBuilder
 
 
@@ -61,6 +61,7 @@ def test_build_produces_a_well_formed_deck(tmp_path):
 
 def test_build_reflects_signed_off_state(tmp_path):
     report = _sample_report()
+    report.signoffs = [SignoffRecord(by="jane.validator", at="2026-06-30T00:00:00+00:00")]
     report.signed_off_by = "jane.validator"
     report.signed_off_at = "2026-06-30T00:00:00+00:00"
     output_path = ValidationDeckBuilder().build(report, tmp_path / "signed.pptx")
@@ -68,3 +69,19 @@ def test_build_reflects_signed_off_state(tmp_path):
     full_text = _all_text(prs)
     assert "jane.validator" in full_text
     assert "PENDING" not in full_text
+
+
+def test_build_includes_charts_and_trend_slides_when_history_given(tmp_path):
+    report = _sample_report()
+    history = [
+        ValidationReport(
+            domain="credit_risk", title="t", scope="s", methodology="m",
+            entity_under_review="PD-RETAIL-01 (mortgages)", reporting_period="2026Q1",
+            overall_rating="compliant", quantitative_results={"psi": 0.10, "gini": 0.55},
+        ),
+    ]
+    output_path = ValidationDeckBuilder().build(report, tmp_path / "trend.pptx", history=history)
+    prs = Presentation(str(output_path))
+    full_text = _all_text(prs)
+    assert "Metric Trend: psi" in full_text
+    assert "Metric Trend: gini" in full_text

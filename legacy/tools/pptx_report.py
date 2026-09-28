@@ -5,9 +5,14 @@ Builds a draft PowerPoint deck from a single, domain-agnostic
 "DRAFT -- not a regulatory submission" banner, and the sign-off slide is
 regenerated (not just re-labeled) once the report has been signed off --
 see agents/risk_validation_team.py::RiskValidationOrchestrator.execute.
+
+``blank_slide``/``add_banner`` are module-level (not just builder methods) so
+tools/risk_rollup.py's executive rollup deck can reuse the same slide shell
+without duplicating it.
 """
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from pptx import Presentation
@@ -15,6 +20,7 @@ from pptx.dml.color import RGBColor
 from pptx.util import Inches, Pt
 
 from agents.risk_schemas import ValidationFinding, ValidationReport
+from tools.report_charts import render_metric_chart
 
 DISCLAIMER_BANNER = "DRAFT -- NOT A REGULATORY SUBMISSION"
 
@@ -27,18 +33,75 @@ _SEVERITY_COLOR = {
 }
 
 _MAX_FINDING_ROWS_PER_SLIDE = 8
+_MAX_TREND_CHARTS = 3
+
+
+def add_banner(prs: Presentation, slide) -> None:
+    box = slide.shapes.add_textbox(Inches(0.3), prs.slide_height - Inches(0.4), prs.slide_width - Inches(0.6), Inches(0.3))
+    tf = box.text_frame
+    tf.text = DISCLAIMER_BANNER
+    run = tf.paragraphs[0].runs[0]
+    run.font.size = Pt(10)
+    run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+    run.font.bold = True
+
+
+def blank_slide(prs: Presentation, heading: str):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
+    add_banner(prs, slide)
+    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), prs.slide_width - Inches(1.0), Inches(0.7))
+    tf = title_box.text_frame
+    tf.text = heading
+    tf.paragraphs[0].font.size = Pt(28)
+    tf.paragraphs[0].font.bold = True
+    return slide
+
+
+def new_presentation() -> Presentation:
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    return prs
+
+
+def _shared_numeric_trend_series(
+    current: dict, history: list[ValidationReport],
+) -> dict[str, list[float]]:
+    """Top-level numeric keys present in ``current`` and at least one prior
+    cycle's quantitative_results, each mapped to its value series
+    (oldest..newest, current last)."""
+    series: dict[str, list[float]] = {}
+    for key, value in current.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        prior = [
+            r.quantitative_results[key]
+            for r in history
+            if isinstance(r.quantitative_results.get(key), (int, float))
+            and not isinstance(r.quantitative_results.get(key), bool)
+        ]
+        if prior:
+            series[key] = [float(v) for v in prior] + [float(value)]
+    return series
 
 
 class ValidationDeckBuilder:
     """Builds a draft PPTX validation deck from a ValidationReport."""
 
-    def build(self, report: ValidationReport, output_path: str | Path) -> Path:
-        prs = Presentation()
-        prs.slide_width = Inches(13.333)
-        prs.slide_height = Inches(7.5)
+    def build(
+        self,
+        report: ValidationReport,
+        output_path: str | Path,
+        *,
+        history: list[ValidationReport] | None = None,
+    ) -> Path:
+        prs = new_presentation()
 
         self._title_slide(prs, report)
         self._text_slide(prs, "Executive Summary", report.overall_conclusion or "(pending)")
+        self._recommendation_slide(prs, report)
+        self._prior_findings_slide(prs, report)
+        self._validation_sample_slide(prs, report)
         self._text_slide(
             prs, "Scope & Methodology",
             f"Scope:\n{report.scope}\n\nMethodology:\n{report.methodology}",
@@ -47,6 +110,8 @@ class ValidationDeckBuilder:
         self._activities_slide(prs, report)
         self._findings_slides(prs, report)
         self._quantitative_slide(prs, report)
+        if history:
+            self._trend_slides(prs, report, history)
         self._recommendations_slide(prs, report)
         self._conclusion_slide(prs, report)
         self._signoff_slide(prs, report)
@@ -59,27 +124,14 @@ class ValidationDeckBuilder:
     # ---------- slide helpers ----------
 
     def _blank_slide(self, prs: Presentation, heading: str):
-        slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
-        self._banner(prs, slide)
-        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), prs.slide_width - Inches(1.0), Inches(0.7))
-        tf = title_box.text_frame
-        tf.text = heading
-        tf.paragraphs[0].font.size = Pt(28)
-        tf.paragraphs[0].font.bold = True
-        return slide
+        return blank_slide(prs, heading)
 
     def _banner(self, prs: Presentation, slide) -> None:
-        box = slide.shapes.add_textbox(Inches(0.3), prs.slide_height - Inches(0.4), prs.slide_width - Inches(0.6), Inches(0.3))
-        tf = box.text_frame
-        tf.text = DISCLAIMER_BANNER
-        run = tf.paragraphs[0].runs[0]
-        run.font.size = Pt(10)
-        run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
-        run.font.bold = True
+        add_banner(prs, slide)
 
     def _title_slide(self, prs: Presentation, report: ValidationReport) -> None:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
-        self._banner(prs, slide)
+        add_banner(prs, slide)
         title_box = slide.shapes.add_textbox(Inches(0.7), Inches(2.2), prs.slide_width - Inches(1.4), Inches(1.5))
         tf = title_box.text_frame
         tf.word_wrap = True
@@ -112,6 +164,55 @@ class ValidationDeckBuilder:
         tf.text = body
         for p in tf.paragraphs:
             p.font.size = Pt(16)
+
+    def _recommendation_slide(self, prs: Presentation, report: ValidationReport) -> None:
+        """Rendered only when the derived recommendation is committal -- keeps
+        the deck unchanged for reports that carry the default."""
+        if not report.recommendation or report.recommendation == "not_a_recommendation":
+            return
+        lines = [
+            f"Recommendation: {report.recommendation.replace('_', ' ').upper()}",
+            "",
+            (
+                "Derived deterministically from the overall rating and the gate result; "
+                "a drafting aid, not a supervisory decision."
+            ),
+        ]
+        if report.conditions:
+            lines.append("")
+            lines.append("Conditions:")
+            lines.extend(f"  - {c}" for c in report.conditions)
+        self._text_slide(prs, "Recommendation & Conditions", "\n".join(lines))
+
+    def _prior_findings_slide(self, prs: Presentation, report: ValidationReport) -> None:
+        rows_data = report.follow_up_on_prior_findings
+        if not rows_data:
+            return
+        slide = self._blank_slide(prs, "Follow-up on Prior Findings")
+        rows = len(rows_data) + 1
+        table_shape = slide.shapes.add_table(rows, 4, Inches(0.4), Inches(1.3), Inches(12.5), Inches(0.5) * rows)
+        table = table_shape.table
+        for i, w in enumerate((Inches(3.4), Inches(2.6), Inches(1.6), Inches(4.9))):
+            table.columns[i].width = w
+        for i, header in enumerate(["Reference", "Area", "Status", "Note"]):
+            table.cell(0, i).text = header
+        for row, pf in enumerate(rows_data, start=1):
+            table.cell(row, 0).text = pf.finding_reference
+            table.cell(row, 1).text = pf.area
+            table.cell(row, 2).text = pf.status
+            table.cell(row, 3).text = pf.note
+
+    def _validation_sample_slide(self, prs: Presentation, report: ValidationReport) -> None:
+        if not (report.validation_sample or report.materiality_rationale or report.deviations_from_policy):
+            return
+        parts: list[str] = []
+        if report.validation_sample:
+            parts.append(f"Validation sample:\n{report.validation_sample}")
+        if report.materiality_rationale:
+            parts.append(f"Materiality rationale:\n{report.materiality_rationale}")
+        if report.deviations_from_policy:
+            parts.append("Deviations from policy:\n" + "\n".join(f"  - {d}" for d in report.deviations_from_policy))
+        self._text_slide(prs, "Validation Sample & Materiality", "\n\n".join(parts))
 
     def _overview_slide(self, prs: Presentation, report: ValidationReport) -> None:
         body = (
@@ -185,13 +286,28 @@ class ValidationDeckBuilder:
             box.text_frame.text = "No quantitative results were supplied."
             return
         rows = len(results) + 1
-        table_shape = slide.shapes.add_table(rows, 2, Inches(0.5), Inches(1.3), Inches(6.0), Inches(0.4) * rows)
+        table_shape = slide.shapes.add_table(rows, 2, Inches(0.5), Inches(1.3), Inches(5.5), Inches(0.4) * rows)
         table = table_shape.table
         table.cell(0, 0).text = "Metric"
         table.cell(0, 1).text = "Value"
         for i, (key, value) in enumerate(results.items(), start=1):
             table.cell(i, 0).text = str(key)
             table.cell(i, 1).text = str(value)
+
+        numeric_results = {
+            k: v for k, v in results.items() if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+        if numeric_results:
+            chart_bytes = render_metric_chart(numeric_results, "Current Metrics")
+            slide.shapes.add_picture(io.BytesIO(chart_bytes), Inches(6.5), Inches(1.3), width=Inches(6.3))
+
+    def _trend_slides(self, prs: Presentation, report: ValidationReport, history: list[ValidationReport]) -> None:
+        series_by_key = _shared_numeric_trend_series(report.quantitative_results, history)
+        for key, series in list(series_by_key.items())[:_MAX_TREND_CHARTS]:
+            slide = self._blank_slide(prs, f"Metric Trend: {key}")
+            labeled = {f"cycle {i + 1}": value for i, value in enumerate(series)}
+            chart_bytes = render_metric_chart(labeled, f"{key} across validation cycles")
+            slide.shapes.add_picture(io.BytesIO(chart_bytes), Inches(2.5), Inches(1.5), width=Inches(8.0))
 
     def _recommendations_slide(self, prs: Presentation, report: ValidationReport) -> None:
         actionable = [f for f in report.findings if f.recommendation]
@@ -234,10 +350,19 @@ class ValidationDeckBuilder:
         tf = box.text_frame
         tf.word_wrap = True
         tf.text = f"Prepared by: {report.prepared_by}"
-        p2 = tf.add_paragraph()
-        p2.text = f"Signed off by: {report.signed_off_by or 'PENDING -- human validator sign-off required'}"
-        p3 = tf.add_paragraph()
-        p3.text = f"Signed off at: {report.signed_off_at or 'n/a'}"
+        if report.preparer:
+            prep = tf.add_paragraph()
+            prep.text = f"Case file prepared by: {report.preparer} (may not sign off this report)"
+        req = tf.add_paragraph()
+        req.text = f"Required sign-offs: {report.required_signoffs}"
+        if report.signoffs:
+            for signoff in report.signoffs:
+                role_suffix = f" ({signoff.role})" if signoff.role else ""
+                p = tf.add_paragraph()
+                p.text = f"Signed off by {signoff.by}{role_suffix} at {signoff.at}"
+        else:
+            p = tf.add_paragraph()
+            p.text = "PENDING -- human validator sign-off required"
         for p in tf.paragraphs:
             p.font.size = Pt(16)
 

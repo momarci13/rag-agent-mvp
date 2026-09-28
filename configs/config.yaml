@@ -1,8 +1,9 @@
-# Quant Research + Risk Validation Agent configuration
+# Model Development & Validation Studio configuration
 # ---------------------------------------------------------------
-# All model inference is hosted through the direct OpenAI API. No local LLM
-# or embedding model is loaded by the application. Every call incurs real
-# OpenAI API cost -- there is no "free tier" route.
+# Two agents: the Modeler (designs, codes, tests and documents a model) and
+# the Validator (replicates, reviews, tests independently and reports).
+# All inference goes through the OpenAI API; every call is billed.
+# Secrets (OPENAI_API_KEY, STUDIO_API_TOKEN) come from the environment only.
 
 llm:
   # OPENAI_* environment variables (OPENAI_API_KEY, OPENAI_MODEL,
@@ -22,22 +23,12 @@ llm:
       capabilities: ["reasoning", "quant", "research"]
   selection_strategy: "priority"
   role_models:
-    planner: "gpt-5.1-mini"
-    research: "gpt-5.1"
-    quant: "gpt-5.1"
-    model: "gpt-5.1"
-    risk: "gpt-5.1-mini"
-    trader: "gpt-5.1-mini"
-    writer: "gpt-5.1-mini"
-    narrator: "gpt-5.1-mini"
-    credit_validator: "gpt-5.1"
-    noncredit_validator: "gpt-5.1"
-    model_validator: "gpt-5.1"
-    report_writer: "gpt-5.1-mini"
+    modeler: "gpt-5.1"
+    validator: "gpt-5.1"
   temperature: 0.2
   timeout_s: 240
   fallback_timeout_s: 90
-  max_output_tokens: 4096
+  max_output_tokens: 16000
 
 rag:
   db_path: "./kb/chroma"
@@ -70,43 +61,20 @@ rag:
   # }
   # Example: retrieve(query, metadata_filters={"year_min": "2020"})
 
-agent:
-  max_iterations: 2         # critic revision loop cap
-  sandbox_timeout_s: 60
-  sandbox_mem_mb: 2048
-
-trading:
-  # All execution is PAPER by default. Live trading requires
-  # ALLOW_LIVE=1 in the environment AND a manual confirm prompt.
-  broker: "paper"
-  initial_equity: 100000.0
-  max_leverage: 1.0
-  max_position_pct: 0.20
-  max_turnover_per_rebalance: 0.50
-  var_confidence: 0.99
-  var_limit_pct: 0.05       # max 1-day 99% VaR as fraction of equity
-  kelly_fraction: 0.33      # fractional Kelly (haircut on f*)
-
-ibkr:
-  # Orders are rejected unless the account is a paper account (normally DU*)
-  # and an explicit approval token is presented. Set IBKR_ACCOUNT in the env.
-  enabled: false
-  host: "127.0.0.1"
-  port: 7497
-  client_id: 71
-  paper_only: true
-  transmit: false
-  require_approval: true
-  max_order_notional: 10000.0
-  max_daily_notional: 25000.0
-  allowed_order_types: ["LMT"]
-
-quant_team:
-  model_risk:
-    min_sharpe: 0.0
-    min_deflated_sharpe: 0.50
-    max_drawdown: 0.25
-    max_var_99: 0.05
+studio:
+  output_dir: "output/studio"
+  max_rounds: 3                 # Modeler/Validator remediation rounds before handing over to a human
+  pipeline_timeout_s: 900       # wall clock for one run of the model pipeline
+  test_timeout_s: 900           # wall clock for one pytest run
+  sandbox_mem_mb: 4096          # memory cap for generated code (POSIX only)
+  max_repair_attempts: 2        # automatic fixes of crashing code per step
+  replication_rel_tol: 1.0e-6   # reported vs replicated metrics (develop mode)
+  replication_abs_tol: 1.0e-9
+  challenger_material_gap: 0.02 # relative gap on the primary metric that counts as "challenger better"
+  pdf_via: "libreoffice"        # "libreoffice" | "docx2pdf" (Windows + Word)
+  data_sample_rows: 5           # sample rows shown to the LLM in the data profile
+  library_collection: "studio-library-v1"
+  builtin_corpus_dir: "data/regulatory"
 
 risk_validation:
   # Bank Risk Validation Department agent team (credit / non-credit / model
@@ -117,61 +85,64 @@ risk_validation:
   credit_risk:
     max_psi: 0.25
     min_gini: 0.40
-    max_backtesting_exception_rate: 0.05   # exceptions / observations
+    max_backtesting_exception_rate: 0.05   # exceptions / observations; fallback when observations < 30
+    pd_calibration_significance: 0.05      # Jeffreys / binomial PD calibration p-value cutoff (EBA/GL/2017/16)
+    lgd_backtesting_significance: 0.05     # one-sided t-test p-value cutoff (used only when a sample std is available)
+    lgd_backtesting_tolerance: 0.10        # absolute LGD/CCF mean gap tolerated (the default path when no sample std)
+    min_moc_pct: 0.0                       # min documented Margin of Conservatism when data deficiencies exist
+    min_data_completeness_pct: 95.0        # EBA/GL/2017/16 + BCBS 239 data-quality floor
+    min_data_accuracy_pct: 98.0
+    min_observation_period_years: 5        # CRR minimum historical observation period
+    revalidation_days: 365                # max age of the last credit-model validation before it is overdue
+    revalidation_warning_days: 60          # raise a low-severity finding this many days before due
     max_override_rate_pct: 0.10
+    max_single_name_concentration_pct: 5.0
+    # Per-jurisdiction overrides (merged on top of the block above via
+    # ValidationThresholds.resolve()). Only list the fields that differ.
+    jurisdictions:
+      HU:
+        max_psi: 0.20                       # illustrative: stricter national-discretion example
+        min_observation_period_years: 7     # illustrative MNB national-discretion add-on
   non_credit_risk:
     market:
       max_var_backtesting_exceptions_250d: 4       # Basel traffic-light green/yellow boundary, illustrative
       max_var_backtesting_exceptions_red_250d: 9
+      kupiec_significance_level: 0.05              # p-value threshold for the Kupiec POF test
+      es_confidence_level: 0.975                   # FRTB replaces VaR with Expected Shortfall at 97.5%
+      require_expected_shortfall: true            # flag when ES is not reported alongside VaR
+      backtesting_confidence_levels: [0.99, 0.975] # run the traffic-light/Kupiec check at each level supplied
+      pla_spearman_green: 0.80                     # FRTB P&L-attribution green zone (BCBS d457)
+      pla_spearman_amber: 0.70
+      pla_ks_green: 0.09
+      pla_ks_amber: 0.12
     operational:
       material_loss_threshold_amount: 100000
     liquidity:
       min_lcr_pct: 100.0
       min_nsfr_pct: 100.0
+      max_funding_concentration_pct: 25.0
   model_risk:
     max_psi: 0.25
     min_gini: 0.40
     tier_1_revalidation_days: 365
     tier_2_revalidation_days: 730
     tier_3_revalidation_days: 1095
-  approval_token_ttl_s: 1800   # sign-off tokens live 30 min
-  pdf_via: "libreoffice"       # "libreoffice" | "docx2pdf" | "latex"
-
-regulatory_rag:
-  # Separate collection from the quant corpus so the two domains don't
-  # pollute each other's retrieval.
-  collection: "regulatory-corpus-v1"
-  corpus_dir: "data/regulatory"
-
-writing:
-  latex_engine: "pdflatex"  # or "pdflatex"; tectonic is a single binary
-  citation_sim_threshold: 0.55  # min cosine sim to support a cited claim
-
-research:
-  # Staged research pipeline (--research flag or /research-task endpoint)
-  n_papers: 8               # arXiv papers to acquire per topic
-  kg_enabled: true          # update knowledge graph after each run
-  skip_known_papers: true   # skip papers already in the literature registry
-  citation_dag_hops: 2      # max citation graph traversal depth
-  # arXiv categories auto-detected from keywords:
-  #   ML/DL  -> cs.LG, cs.AI, stat.ML, stat.AP, math.ST
-  #   Finance -> q-fin, q-fin.PM, stat.ML, math.ST
-  #   Both   -> all categories above
-
-autonomous_loop:
-  n_iterations: 3           # max iterations in autonomous research loop
-  n_papers_per_iter: 6      # papers searched per loop iteration
-  quality_threshold: 0.40   # target mean retrieval score before stopping
-
-memory:
-  compression_threshold: 20 # compress when task message count exceeds this
-  keep_last: 8              # always retain N most-recent messages
-  kb_expansion_threshold: 0.25  # mean score below which auto KB expansion fires
-
-data:
-  # Free FRED API key: https://fred.stlouisfed.org/docs/api/api_key.html
-  # Leave empty to use the public CSV fallback (slower but still works).
-  fred_api_key: ""
-  # OpenAlex polite pool — provide your email for higher rate limits.
-  # https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication
-  openalex_email: ""
+    revalidation_warning_days: 60
+    # Per-tier overrides (merged on top of the block above). Tier 1 (high
+    # materiality) is illustratively stricter than the flat defaults.
+    tiers:
+      tier_1_high_materiality:
+        max_psi: 0.15
+        min_gini: 0.45
+        required_signoffs: 2   # four-eyes sign-off for high-materiality models
+  required_signoffs: 1          # raise to 2+ for four-eyes sign-off
+  require_distinct_signoffs: true   # duplicate sign-offs by the same person do not count toward the threshold
+  # Severity -> remediation deadline (days) applied to any finding without an
+  # explicit remediation_deadline_days. Illustrative -- replace with the bank's
+  # findings-management policy.
+  remediation_deadlines:
+    critical: 30
+    high: 90
+    medium: 180
+    low: 365
+  evidence_overlap_min_ratio: 0.15   # below this, a finding's evidence is flagged evidence_grounded=false

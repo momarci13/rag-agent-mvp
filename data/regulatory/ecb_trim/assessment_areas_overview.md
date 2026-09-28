@@ -7,6 +7,12 @@
 > guide or methodology documents and must not be cited as such. Replace
 > with the real ECB guidance before relying on it for anything beyond
 > structural drafting scaffolding.
+>
+> **Superseded as living guidance.** TRIM was a 2017-2021 supervisory
+> *exercise*. Its expectations were consolidated into the **ECB guide to
+> internal models (EGIM)**, which is the current standing guidance -- see
+> `../ecb_egim/`. This file is retained because "TRIM" still appears in
+> older validation documentation and as a historical cross-reference.
 
 ## Representative assessment areas
 

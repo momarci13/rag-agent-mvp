@@ -24,13 +24,29 @@ frameworks, without claiming to reproduce them.
 
 ```
 data/regulatory/
-  eba_gl_2017_11/            EBA Guidelines on PD/LGD estimation and
-                              internal model validation -- representative
-                              heading structure and checklist only.
+  eba_gl_2017_11/            EBA Guidelines on the *definition of default*
+                              (Art. 178 CRR) -- representative structure.
+  eba_gl_2017_16_pd_lgd/     EBA Guidelines on PD/LGD estimation and the
+                              treatment of defaulted exposures, incl. the
+                              Margin of Conservatism -- representative
+                              structure + the IRB model validation checklist
+                              matching CREDIT_VALIDATION_AREAS.
+  eba_gl_2019_03_downturn_lgd/  EBA Guidelines on downturn LGD estimation.
+  ecb_egim/                  ECB guide to internal models (EGIM) -- general
+                              topics, credit risk, market risk, and a
+                              counterparty-credit-risk stub. EGIM is the
+                              living guidance that superseded TRIM.
+  ecb_trim/                  ECB Targeted Review of Internal Models (TRIM)
+                              -- historical assessment-area structure.
+  frtb_market_risk/          FRTB (BCBS d457) -- VaR back-testing
+                              traffic-light, the P&L attribution test, and
+                              Expected Shortfall.
+  bcbs_239_risk_data/        BCBS 239 risk data aggregation & reporting
+                              principles.
+  model_change_529_2014/     Delegated Regulation (EU) 529/2014 -- material
+                              vs non-material IRB model change taxonomy.
   corep_finrep_templates/    Generic COREP/FINREP template-numbering
                               conventions (illustrative examples only).
-  ecb_trim/                  ECB Targeted Review of Internal Models (TRIM)
-                              -- representative assessment-area structure.
   mnb_circulars/              Generic Magyar Nemzeti Bank (MNB) circular/
                               template conventions -- representative
                               structure only.

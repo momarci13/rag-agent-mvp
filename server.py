@@ -1,3 +1,9 @@
+"""HTTP API and web UI for the Modeler / Validator studio.
+
+Run:  uvicorn server:app --reload
+Mutating endpoints require the header X-Studio-Token matching the
+STUDIO_API_TOKEN environment variable; they are disabled when it is unset.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -5,387 +11,144 @@ import json
 import logging
 import os
 import secrets
+import threading
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from agents.llm import HostedLLM
-from run import load_config, make_llm_config, make_tools, run_kan_demo
-from tools import task_conversation, task_storage
-
-try:
-    from sse_starlette.sse import EventSourceResponse
-    _SSE_AVAILABLE = True
-except ImportError:
-    _SSE_AVAILABLE = False
+from studio.config import ROOT, StudioSettings, load_config, make_llm_config
+from studio.frameworks import FRAMEWORK_LABELS
+from studio.orchestrator import InputError, Studio
+from studio.schemas import Project, ProjectInput, Signoff
+from studio.storage import resolve_inside
 
 logger = logging.getLogger(__name__)
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+DOWNLOADABLE = {".docx", ".pdf", ".py", ".json", ".png", ".csv", ".xml", ".txt", ".md", ".ini"}
+_running: set[str] = set()
+_running_lock = threading.Lock()
 
-# In-memory registry for background task progress
-_bg_tasks: dict[str, dict] = {}
-_quant_runs: dict[str, tuple[Any, Any]] = {}
-_risk_runs: dict[str, tuple[Any, Any]] = {}
-_risk_run_files: dict[str, dict[str, str]] = {}
 
-ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "configs" / "config.yaml"
-OUTPUT_RUNS = ROOT / "output" / "runs"
-OUTPUT_RUNS.mkdir(parents=True, exist_ok=True)
-OUTPUT_RISK_VALIDATION = ROOT / "output" / "risk_validation"
-OUTPUT_RISK_VALIDATION.mkdir(parents=True, exist_ok=True)
+def _config() -> dict[str, Any]:
+    return load_config()
 
-# Startup: configure logging + run migration from legacy format
-async def startup_migration():
-    (ROOT / "output").mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(str(ROOT / "output" / "agent.log")),
-        ],
-    )
+
+def _llm(cfg: dict[str, Any]):
+    from agents.llm import HostedLLM
+
+    return HostedLLM(make_llm_config(cfg))
+
+
+@lru_cache(maxsize=1)
+def _studio() -> Studio:
+    from studio.library import Library, make_rag
+    from studio.storage import ProjectStore
+
+    cfg = _config()
+    settings = StudioSettings.from_config(cfg)
+    rag = make_rag(cfg, settings.library_collection)
+    library = Library(settings.output_dir.parent / "library", rag)
     try:
-        migration_result = task_storage.migrate_legacy_runs()
-        if migration_result["migrated"] > 0:
-            logger.info("[STARTUP] Migrated %d legacy tasks", migration_result["migrated"])
-    except Exception as e:
-        logger.warning("[STARTUP] Migration warning: %s", e)
+        library.ensure_builtin(settings.builtin_corpus_dir)
+    except Exception as exc:  # noqa: BLE001 - library still usable for uploads later
+        logger.warning("Built-in reference corpus not ingested: %s", exc)
+    return Studio(cfg, _llm(cfg), library, ProjectStore(settings.output_dir), settings)
+
+
+def _recover_interrupted() -> None:
+    try:
+        studio = _studio()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Studio not initialised at startup: %s", exc)
+        return
+    for project in studio.store.list():
+        if project.status in ("queued", "running") and project.project_id not in _running:
+            project.status = "failed"
+            project.error = "The server stopped while this project was running. Start a new project to retry."
+            studio.store.save(project)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await startup_migration()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
+    _recover_interrupted()
     yield
 
 
-app = FastAPI(title="Quant Research + IBKR RAG Agents", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Model Development & Validation Studio", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "web"), name="static")
 
 
-def _config() -> dict[str, Any]:
-    return load_config(str(CONFIG_PATH))
-
-
-def _llm(cfg: dict[str, Any]) -> HostedLLM:
-    llm_cfg = make_llm_config(cfg)
-    return HostedLLM(llm_cfg)
-
-
-def _require_trader_auth(provided: str | None) -> None:
-    expected = os.getenv("TRADER_API_TOKEN", "")
+def _require_token(provided: str | None) -> None:
+    expected = os.getenv("STUDIO_API_TOKEN", "")
     if not expected:
-        raise HTTPException(503, "Trading API is disabled until TRADER_API_TOKEN is configured")
+        raise HTTPException(503, "Disabled until STUDIO_API_TOKEN is set on the server")
     if provided is None or not secrets.compare_digest(provided, expected):
-        raise HTTPException(401, "Invalid X-Trader-Token")
+        raise HTTPException(401, "Invalid X-Studio-Token")
 
 
-def _require_risk_auth(provided: str | None) -> None:
-    # Deliberately a separate token/env var from trading -- these are
-    # logically separate systems with separate operators in a real bank.
-    expected = os.getenv("RISK_VALIDATION_API_TOKEN", "")
-    if not expected:
-        raise HTTPException(503, "Risk Validation API is disabled until RISK_VALIDATION_API_TOKEN is configured")
-    if provided is None or not secrets.compare_digest(provided, expected):
-        raise HTTPException(401, "Invalid X-Risk-Token")
-
-
-def _rag(cfg: dict[str, Any]):
+def _load(project_id: str) -> Project:
     try:
-        from rag.hybrid import LiteHybridRAG
-    except Exception as exc:
-        raise HTTPException(500, f"RAG backend unavailable: {exc}")
-    return LiteHybridRAG(
-        db_path=cfg["rag"]["db_path"],
-        collection=cfg["rag"].get("collection", "openai-embed-v1"),
-        embedding_model=cfg["rag"]["embedding_model"],
-        alpha_dense=cfg["rag"]["alpha_dense"],
-        query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
-        query_expansion_method=cfg["rag"]["query_expansion"]["method"],
-        max_expansions=cfg["rag"]["query_expansion"]["max_expansions"],
-        reranking_enabled=cfg["rag"]["reranking"]["enabled"],
-        reranking_model=cfg["rag"]["reranking"]["model"],
-        top_k_before_rerank=cfg["rag"]["reranking"]["top_k_before_rerank"],
-        top_k_after_rerank=cfg["rag"]["reranking"]["top_k_after_rerank"],
-    )
+        return _studio().store.load(project_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "Project not found") from None
 
 
-def _regulatory_rag(cfg: dict[str, Any]):
-    """RAG instance pointed at the regulatory placeholder corpus's own
-    Chroma collection, kept separate from the quant corpus's collection."""
-    try:
-        from rag.hybrid import LiteHybridRAG
-    except Exception as exc:
-        raise HTTPException(500, f"RAG backend unavailable: {exc}")
-    reg_cfg = cfg.get("regulatory_rag", {})
-    return LiteHybridRAG(
-        db_path=cfg["rag"]["db_path"],
-        collection=reg_cfg.get("collection", "regulatory-corpus-v1"),
-        embedding_model=cfg["rag"]["embedding_model"],
-        alpha_dense=cfg["rag"]["alpha_dense"],
-        query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
-        query_expansion_method=cfg["rag"]["query_expansion"]["method"],
-        max_expansions=cfg["rag"]["query_expansion"]["max_expansions"],
-        reranking_enabled=cfg["rag"]["reranking"]["enabled"],
-        reranking_model=cfg["rag"]["reranking"]["model"],
-        top_k_before_rerank=cfg["rag"]["reranking"]["top_k_before_rerank"],
-        top_k_after_rerank=cfg["rag"]["reranking"]["top_k_after_rerank"],
-    )
+async def _read_uploads(files: list[UploadFile] | None) -> list[tuple[str, bytes]]:
+    out = []
+    for f in files or []:
+        if not f.filename:
+            continue
+        content = await f.read()
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"{f.filename} is larger than 200 MB")
+        out.append((f.filename, content))
+    return out
 
 
-def _parse_risk_inputs(domain: str, inputs: dict[str, Any]):
-    from pydantic import ValidationError
+def _start(project_id: str) -> None:
+    with _running_lock:
+        if project_id in _running:
+            return
+        _running.add(project_id)
 
-    from agents.risk_schemas import (
-        CreditModelValidationInputs,
-        ModelRiskValidationInputs,
-        NonCreditRiskValidationInputs,
-    )
+    def work() -> None:
+        try:
+            _studio().run(project_id)
+        finally:
+            with _running_lock:
+                _running.discard(project_id)
 
-    schema_map = {
-        "credit_risk": CreditModelValidationInputs,
-        "non_credit_risk": NonCreditRiskValidationInputs,
-        "model_risk": ModelRiskValidationInputs,
-    }
-    schema = schema_map.get(domain)
-    if schema is None:
-        raise HTTPException(400, f"Unknown domain {domain!r}; expected one of {sorted(schema_map)}")
-    try:
-        return schema.model_validate(inputs)
-    except ValidationError as exc:
-        raise HTTPException(422, f"Invalid inputs for domain {domain}: {exc}") from exc
+    threading.Thread(target=work, name=f"studio-{project_id}", daemon=True).start()
 
 
-def _export_risk_report(cfg: dict[str, Any], report: Any, run_id: str) -> dict[str, str]:
-    """Generate PPTX + DOCX + (best-effort) PDF for a risk-validation report,
-    overwriting any earlier draft for the same run_id."""
-    from tools.docx_report import ValidationWordReportBuilder
-    from tools.docx_to_pdf import convert_docx_to_pdf
-    from tools.pptx_report import ValidationDeckBuilder
-
-    out_dir = OUTPUT_RISK_VALIDATION / run_id
-    pptx_path = ValidationDeckBuilder().build(report, out_dir / "report.pptx")
-    docx_path = ValidationWordReportBuilder().build(report, out_dir / "report.docx")
-    pdf_engine = cfg.get("risk_validation", {}).get("pdf_via", "libreoffice")
-    pdf_path = None
-    if pdf_engine in ("libreoffice", "docx2pdf"):
-        pdf_path = convert_docx_to_pdf(docx_path, out_dir, engine=pdf_engine)
-
-    files = {"pptx": str(pptx_path), "docx": str(docx_path)}
-    if pdf_path is not None:
-        files["pdf"] = str(pdf_path)
-    _risk_run_files[run_id] = files
-    return files
-
-
-def _build_task_response(state: Any, task_id: str) -> dict[str, Any]:
-    """Extract narrative, code, and PDF URL from the last non-literature artifact."""
-    last_artifact = next(
-        (a for a in reversed(state.artifacts) if a.get("type") != "literature"), None
-    )
-    narrative: dict = {}
-    code: str = ""
-    pdf_url: str | None = None
-
-    if last_artifact:
-        report = last_artifact.get("report", {})
-        narrative = report.get("narrative", {})
-
-        art_type = last_artifact.get("type", "")
-        payload = last_artifact.get("payload", {})
-        if art_type == "ds":
-            code = payload.get("code", "")
-        elif art_type == "quant":
-            spec = payload.get("spec", {})
-            code = spec.get("signal_code", "")
-        elif art_type == "writing":
-            code = payload.get("tex", "")[:3000]
-
-        pdf_info = report.get("pdf")
-        if isinstance(pdf_info, dict) and pdf_info.get("pdf"):
-            pdf_url = f"/api/reports/{task_id}/pdf"
-
+def _summary(p: Project) -> dict[str, Any]:
+    last = p.current_round()
+    open_f = p.open_findings()
     return {
-        "status": "ok",
-        "task_id": task_id,
-        "narrative": narrative,
-        "code": code,
-        "pdf_url": pdf_url,
-        "run": task_storage._serialize_for_json(state),
+        "project_id": p.project_id,
+        "title": p.input.title,
+        "mode": p.input.mode,
+        "status": p.status,
+        "created_at": p.created_at,
+        "updated_at": p.updated_at,
+        "rounds": len(p.rounds),
+        "max_rounds": p.input.max_rounds,
+        "outcome": last.validator.outcome if last else None,
+        "open_findings": {s: sum(1 for f in open_f if f.severity == s) for s in ("critical", "high", "medium", "low")},
+        "last_event": p.trace[-1].model_dump() if p.trace else None,
     }
 
 
-def _save_run(state: Any) -> Path:
-    OUTPUT_RUNS.mkdir(parents=True, exist_ok=True)
-    idx = len(list(OUTPUT_RUNS.glob("run_*.json")))
-    run_path = OUTPUT_RUNS / f"run_{idx:04d}.json"
-    run_path.write_text(json.dumps(asdict(state), indent=2, default=str), encoding="utf-8")
-    return run_path
-
-
-# ── Background task worker functions ─────────────────────────────────────────
-
-def _run_task_background_sync(task_id: str, task_text: str, cfg: dict) -> None:
-    _bg_tasks[task_id] = {"status": "running", "progress": "Starting LLM pipeline..."}
-    try:
-        llm = _llm(cfg)
-        _bg_tasks[task_id]["progress"] = "Retrieving context..."
-        rag = _rag(cfg)
-        tools = make_tools(cfg)
-        from agents.graph import run
-        _bg_tasks[task_id]["progress"] = "Running analysis..."
-        state = run(task_text, llm, rag, max_iter=1, tools=tools)
-        _bg_tasks[task_id]["progress"] = "Saving results..."
-        saved_id = task_storage.save_task(state)
-        result = _build_task_response(state, saved_id)
-        _bg_tasks[task_id] = {"status": "completed", "result": result}
-        logger.info("[SERVER] run_task completed: bg_id=%s task_id=%s", task_id, saved_id)
-    except Exception as exc:
-        logger.exception("[SERVER] run_task background failed: %s", task_id)
-        _bg_tasks[task_id] = {"status": "failed", "error": str(exc)}
-
-
-def _run_research_background_sync(
-    task_id: str, task_text: str, n_papers: int, kg_enabled: bool, cfg: dict
-) -> None:
-    _bg_tasks[task_id] = {"status": "running", "progress": "Starting research pipeline..."}
-    try:
-        llm = _llm(cfg)
-        _bg_tasks[task_id]["progress"] = "Acquiring literature..."
-        rag = _rag(cfg)
-        tools = make_tools(cfg)
-        from agents.graph import research_run
-        research_cfg = cfg.get("research", {})
-        _bg_tasks[task_id]["progress"] = "Running research pipeline..."
-        state = research_run(
-            task_text, llm, rag,
-            max_iter=cfg["agent"]["max_iterations"],
-            tools=tools,
-            n_papers=n_papers or research_cfg.get("n_papers", 8),
-            kg_enabled=kg_enabled and research_cfg.get("kg_enabled", True),
-        )
-        _bg_tasks[task_id]["progress"] = "Saving results..."
-        saved_id = task_storage.save_task(state)
-        result = _build_task_response(state, saved_id)
-        _bg_tasks[task_id] = {"status": "completed", "result": result}
-        logger.info("[SERVER] research_task completed: bg_id=%s task_id=%s", task_id, saved_id)
-    except Exception as exc:
-        logger.exception("[SERVER] research_task background failed: %s", task_id)
-        _bg_tasks[task_id] = {"status": "failed", "error": str(exc)}
-
-
-def _run_autonomous_research_background_sync(
-    task_id: str, topic: str, n_iterations: int, n_papers_per_iter: int, cfg: dict
-) -> None:
-    _bg_tasks[task_id] = {"status": "running", "progress": "Starting autonomous research loop..."}
-    try:
-        from tools.research_loop import autonomous_research_loop
-        from tools.citation_dag import CitationDAG
-        llm = _llm(cfg)
-        rag = _rag(cfg)
-        dag = CitationDAG()
-        loop_cfg = cfg.get("autonomous_loop", {})
-        _bg_tasks[task_id]["progress"] = f"Running {n_iterations} research iterations..."
-        result = autonomous_research_loop(
-            topic=topic,
-            llm=llm,
-            rag=rag,
-            citation_dag=dag,
-            task_id=task_id,
-            n_iterations=n_iterations,
-            n_papers_per_iter=n_papers_per_iter,
-            quality_threshold=loop_cfg.get("quality_threshold", 0.4),
-        )
-        _bg_tasks[task_id] = {
-            "status": "completed",
-            "result": {
-                "task_id": task_id,
-                "topic": topic,
-                "total_papers": result.total_papers_ingested,
-                "iterations": len(result.iterations),
-                "dag_nodes": result.citation_dag_nodes,
-                "report_url": f"/api/tasks/{task_id}/research-report",
-            },
-        }
-        logger.info("[SERVER] Autonomous research completed: %s", task_id)
-    except Exception as exc:
-        logger.exception("[SERVER] Autonomous research failed: %s", task_id)
-        _bg_tasks[task_id] = {"status": "failed", "error": str(exc)}
-
-
-# ── Pydantic request models ───────────────────────────────────────────────────
-
-class TaskRequest(BaseModel):
-    task: str
-
-
-class ResearchTaskRequest(BaseModel):
-    task: str
-    n_papers: int = 8
-    kg_enabled: bool = True
-
-
-class IngestRequest(BaseModel):
-    path: str
-
-
-class MessageRequest(BaseModel):
-    content: str
-    iteration: int = 0
-
-
-class BranchRequest(BaseModel):
-    branch_name: str | None = None
-    from_iteration: int = 0
-
-
-class ReRunRequest(BaseModel):
-    code: str
-
-
-class ApproveSourcesRequest(BaseModel):
-    task_id: str
-    source_ids: list[str]
-
-
-class AutonomousResearchRequest(BaseModel):
-    topic: str
-    n_iterations: int = 3
-    n_papers_per_iter: int = 6
-
-
-class QuantTeamRequest(BaseModel):
-    task: str
-
-
-class QuantExecutionRequest(BaseModel):
-    approval_token: str
-
-
-class RiskValidationRequest(BaseModel):
-    domain: str  # "credit_risk" | "non_credit_risk" | "model_risk"
-    inputs: dict[str, Any]
-
-
-class RiskValidationApprovalRequest(BaseModel):
-    approval_token: str
-    signed_off_by: str
-
+# --------------------------------------------------------------------------
+# Pages and status
+# --------------------------------------------------------------------------
 
 @app.get("/", response_class=FileResponse)
 async def index():
@@ -396,521 +159,182 @@ async def index():
 async def health() -> dict[str, Any]:
     cfg = _config()
     llm = _llm(cfg)
-    llm_ok = False
     try:
         llm_ok = llm.health()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"status": "error", "detail": f"LLM health check failed: {exc}"}
-
-    try:
-        rag = _rag(cfg)
-        rag_count = len(rag)
-    except HTTPException as exc:
-        rag_count = None
-        return {"status": "partial", "llm": llm_ok, "rag": str(exc.detail)}
-
     llm_settings = getattr(llm, "cfg", None)
     return {
         "status": "ok" if llm_ok else "partial",
         "llm": llm_ok,
-        "provider": getattr(llm_settings, "provider_name", cfg["llm"].get("provider_name")),
-        "model": getattr(llm_settings, "model", cfg["llm"]["model"]),
-        "embedding_model": cfg["rag"]["embedding_model"],
-        "rag_chunks": rag_count,
+        "provider": getattr(llm_settings, "provider_name", cfg.get("llm", {}).get("provider_name")),
+        "model": getattr(llm_settings, "model", cfg.get("llm", {}).get("model")),
+        "token_configured": bool(os.getenv("STUDIO_API_TOKEN")),
     }
 
 
-@app.post("/run-task")
-async def run_task(payload: TaskRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    cfg = _config()
-    # Quick hosted-model health-check before queuing.
-    if not _llm(cfg).health():
-        raise HTTPException(500, "LLM is not healthy or unreachable.")
-    task_id = str(uuid4())
-    _bg_tasks[task_id] = {"status": "queued", "progress": "Task queued"}
-    background_tasks.add_task(_run_task_background_sync, task_id, payload.task, cfg)
-    return {"status": "queued", "task_id": task_id}
+@app.get("/api/frameworks")
+async def frameworks() -> dict[str, Any]:
+    return {"frameworks": [{"key": k, "label": v} for k, v in FRAMEWORK_LABELS.items() if k != "sound_practice"]}
 
 
-@app.post("/research-task")
-async def research_task(payload: ResearchTaskRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    """Full staged research pipeline: literature + hypothesis + experiment + KG."""
-    cfg = _config()
-    if not _llm(cfg).health():
-        raise HTTPException(500, "LLM is not healthy or unreachable.")
-    task_id = str(uuid4())
-    _bg_tasks[task_id] = {"status": "queued", "progress": "Research task queued"}
-    background_tasks.add_task(
-        _run_research_background_sync,
-        task_id, payload.task, payload.n_papers, payload.kg_enabled, cfg,
-    )
-    return {"status": "queued", "task_id": task_id}
+# --------------------------------------------------------------------------
+# Projects
+# --------------------------------------------------------------------------
+
+@app.get("/api/projects")
+async def list_projects() -> dict[str, Any]:
+    return {"projects": [_summary(p) for p in _studio().store.list()]}
 
 
-@app.post("/api/quant-team/run")
-async def run_quant_team(
-    payload: QuantTeamRequest,
-    x_trader_token: str | None = Header(default=None),
+@app.post("/api/projects", status_code=202)
+async def create_project(
+    mode: str = Form(...),
+    title: str = Form(...),
+    brief: str = Form(...),
+    frameworks: list[str] = Form(default=[]),
+    max_rounds: int = Form(default=3),
+    challenger: str = Form(default="auto"),
+    data: list[UploadFile] | None = File(default=None),
+    regulations: list[UploadFile] | None = File(default=None),
+    concept_papers: list[UploadFile] | None = File(default=None),
+    package: list[UploadFile] | None = File(default=None),
+    x_studio_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Run the hosted agent team and return an IBKR paper-order preview."""
-    from agents.quant_factory import create_quant_team
-
-    _require_trader_auth(x_trader_token)
-    cfg = _config()
-    llm = _llm(cfg)
-    if not llm.health():
-        raise HTTPException(503, "OpenAI is unavailable or unauthorized")
-    rag = _rag(cfg)
-    tools = make_tools(cfg)
-    team = create_quant_team(cfg, llm, rag, tools["backtest"])
+    _require_token(x_studio_token)
     try:
-        result = await asyncio.to_thread(team.run, payload.task)
-    except Exception as exc:
-        logger.exception("Quant team failed")
-        raise HTTPException(500, f"Quant team failed: {exc}") from exc
-    _quant_runs[result.run_id] = (team, result)
-    return result.model_dump(mode="json")
-
-
-@app.post("/api/quant-team/{run_id}/execute")
-async def execute_quant_order(
-    run_id: str,
-    payload: QuantExecutionRequest,
-    x_trader_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """Consume a one-time approval token and submit the exact previewed order."""
-    _require_trader_auth(x_trader_token)
-    item = _quant_runs.get(run_id)
-    if item is None:
-        raise HTTPException(404, "Quant team run not found or server restarted")
-    team, result = item
-    if result.trade_intent is None:
-        raise HTTPException(409, "This run has no order eligible for execution")
-    try:
-        receipt = await asyncio.to_thread(team.execute, result, payload.approval_token)
-    except PermissionError as exc:
-        raise HTTPException(403, str(exc)) from exc
-    except Exception as exc:
-        logger.exception("IBKR execution failed")
-        raise HTTPException(502, f"IBKR execution failed: {exc}") from exc
-    return receipt.model_dump(mode="json")
-
-
-@app.post("/api/risk-validation/run")
-async def run_risk_validation(
-    payload: RiskValidationRequest,
-    x_risk_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """Run the bank risk-validation agent team and return a draft report.
-
-    DRAFT / SUPPORT TOOL ONLY -- the returned report is not a regulatory
-    submission. Draft PPTX/PDF/DOCX files are generated immediately so a
-    human validator can review them; see /api/risk-validation/{run_id}/approve
-    for the sign-off step required before final export.
-    """
-    from agents.risk_validation_factory import create_risk_validation_team
-
-    _require_risk_auth(x_risk_token)
-    cfg = _config()
-    llm = _llm(cfg)
-    if not llm.health():
-        raise HTTPException(503, "OpenAI is unavailable or unauthorized")
-    inputs = _parse_risk_inputs(payload.domain, payload.inputs)
-    reg_rag = _regulatory_rag(cfg)
-    team = create_risk_validation_team(cfg, llm, reg_rag)
-    try:
-        result = await asyncio.to_thread(team.run, payload.domain, inputs)
-    except Exception as exc:
-        logger.exception("Risk validation run failed")
-        raise HTTPException(500, f"Risk validation run failed: {exc}") from exc
-    _risk_runs[result.run_id] = (team, result)
-    try:
-        await asyncio.to_thread(_export_risk_report, cfg, result.report, result.run_id)
-    except Exception:
-        logger.exception("Draft report export failed for run %s", result.run_id)
-    return result.model_dump(mode="json")
-
-
-@app.post("/api/risk-validation/{run_id}/approve")
-async def approve_risk_validation(
-    run_id: str,
-    payload: RiskValidationApprovalRequest,
-    x_risk_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """Consume the one-time sign-off token and finalize the report.
-
-    Regenerates PPTX/PDF/DOCX with the sign-off fields populated, overwriting
-    the draft versions. This is a workflow control, not a substitute for the
-    bank's actual four-eyes/committee sign-off process.
-    """
-    _require_risk_auth(x_risk_token)
-    item = _risk_runs.get(run_id)
-    if item is None:
-        raise HTTPException(404, "Risk validation run not found or server restarted")
-    team, result = item
-    try:
-        report = await asyncio.to_thread(team.execute, result, payload.approval_token, payload.signed_off_by)
-    except PermissionError as exc:
-        raise HTTPException(403, str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Risk validation sign-off failed")
-        raise HTTPException(500, f"Risk validation sign-off failed: {exc}") from exc
-    cfg = _config()
-    try:
-        await asyncio.to_thread(_export_risk_report, cfg, report, run_id)
-    except Exception as exc:
-        logger.exception("Final report export failed for run %s", run_id)
-        raise HTTPException(500, f"Report signed off but export failed: {exc}") from exc
-    return report.model_dump(mode="json")
-
-
-@app.get("/api/risk-validation/{run_id}")
-async def get_risk_validation_run(run_id: str) -> dict[str, Any]:
-    item = _risk_runs.get(run_id)
-    if item is None:
-        raise HTTPException(404, "Risk validation run not found or server restarted")
-    _, result = item
-    return result.model_dump(mode="json")
-
-
-@app.get("/api/risk-validation/{run_id}/report.{ext}", response_class=FileResponse)
-async def get_risk_validation_report(run_id: str, ext: str):
-    if ext not in ("pptx", "pdf", "docx"):
-        raise HTTPException(400, "Unsupported report format; use pptx, pdf, or docx")
-    files = _risk_run_files.get(run_id)
-    if not files or ext not in files or not Path(files[ext]).exists():
-        detail = (
-            f"{ext.upper()} not available for this run (LibreOffice/docx2pdf "
-            "may not be installed, or the run has not completed)"
-            if ext == "pdf"
-            else f"{ext.upper()} not found for this run"
+        inp = ProjectInput(
+            mode=mode, title=title.strip()[:200], brief=brief.strip(),  # type: ignore[arg-type]
+            frameworks=[f for f in frameworks if f in FRAMEWORK_LABELS],
+            max_rounds=max_rounds, challenger=challenger,  # type: ignore[arg-type]
         )
-        raise HTTPException(404, detail)
-    media_types = {
-        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "pdf": "application/pdf",
-    }
-    return FileResponse(
-        files[ext], media_type=media_types[ext], filename=f"risk_validation_{run_id[:8]}.{ext}",
-    )
-
-
-@app.get("/api/reports/{task_id}/pdf", response_class=FileResponse)
-async def get_report_pdf(task_id: str):
-    """Serve the compiled PDF report for a task."""
-    task = task_storage.load_task(task_id)
-    if not task:
-        raise HTTPException(404, "Task not found")
-
-    for art in reversed(task.artifacts):
-        report = art.get("report", {})
-        pdf_info = report.get("pdf")
-        if isinstance(pdf_info, dict):
-            pdf_path = pdf_info.get("pdf")
-            if pdf_path and Path(pdf_path).exists():
-                return FileResponse(
-                    pdf_path,
-                    media_type="application/pdf",
-                    filename=f"report_{task_id[:8]}.pdf",
-                )
-
-    raise HTTPException(404, "PDF not found for this task (compilation may have failed)")
-
-
-@app.get("/api/tasks/{task_id}/stream")
-async def stream_task_progress(task_id: str):
-    """SSE endpoint streaming progress for a background task."""
-    if not _SSE_AVAILABLE:
-        raise HTTPException(
-            503,
-            "sse-starlette is not installed. "
-            "Run: pip install sse-starlette>=1.8.2",
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not inp.title or not inp.brief:
+        raise HTTPException(422, "Title and brief are required")
+    try:
+        project = _studio().create_project(
+            inp,
+            data=await _read_uploads(data),
+            regulations=await _read_uploads(regulations),
+            concept_papers=await _read_uploads(concept_papers),
+            package=await _read_uploads(package),
         )
+    except InputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    _start(project.project_id)
+    return {"project_id": project.project_id, "status": "queued"}
 
-    async def event_generator():
+
+@app.get("/api/projects/{project_id}")
+async def get_project(project_id: str) -> dict[str, Any]:
+    p = _load(project_id)
+    return {"project": json.loads(p.model_dump_json()), "summary": _summary(p), "running": project_id in _running}
+
+
+@app.get("/api/projects/{project_id}/stream")
+async def stream_project(project_id: str, after: int = 0):
+    _load(project_id)
+
+    async def events():
+        sent = after
         while True:
-            meta = _bg_tasks.get(task_id)
-            if meta is None:
-                yield {
-                    "event": "progress",
-                    "data": json.dumps({"status": "unknown", "progress": "Waiting for task..."}),
-                }
-            elif meta["status"] == "completed":
-                yield {"event": "completed", "data": json.dumps(meta.get("result", {}))}
-                break
-            elif meta["status"] == "failed":
-                yield {
-                    "event": "failed",
-                    "data": json.dumps({"error": meta.get("error", "Unknown error")}),
-                }
-                break
-            else:
-                yield {
-                    "event": "progress",
-                    "data": json.dumps({
-                        "status": meta["status"],
-                        "progress": meta.get("progress", ""),
-                    }),
-                }
+            p = _studio().store.load(project_id)
+            for ev in p.trace[sent:]:
+                yield f"event: trace\ndata: {ev.model_dump_json()}\n\n"
+            sent = len(p.trace)
+            if p.status not in ("queued", "running"):
+                yield f"event: done\ndata: {json.dumps(_summary(p))}\n\n"
+                return
+            yield ": keep-alive\n\n"
             await asyncio.sleep(1.5)
 
-    return EventSourceResponse(event_generator())
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@app.get("/api/tasks/{task_id}/research-report")
-async def get_research_report(task_id: str):
-    """Serve the auto-generated markdown research report for a task."""
-    from tools.auto_report import load_report
-    content = load_report(task_id)
-    if content is None:
-        raise HTTPException(404, "Research report not found (not yet generated for this task)")
-    return PlainTextResponse(content, media_type="text/markdown")
+@app.get("/api/projects/{project_id}/tree")
+async def project_tree(project_id: str) -> dict[str, Any]:
+    _load(project_id)
+    pdir = _studio().store.project_dir(project_id)
+    files = []
+    for path in sorted(pdir.rglob("*")):
+        if path.is_file() and path.suffix.lower() in DOWNLOADABLE and "__pycache__" not in path.parts and not path.name.startswith("."):
+            rel = path.relative_to(pdir).as_posix()
+            if rel == "project.json":
+                continue
+            files.append({"path": rel, "bytes": path.stat().st_size})
+    return {"files": files}
 
 
-@app.post("/api/research/autonomous")
-async def autonomous_research(
-    payload: AutonomousResearchRequest,
-    background_tasks: BackgroundTasks,
+@app.get("/api/projects/{project_id}/files/{rel_path:path}")
+async def project_file(project_id: str, rel_path: str):
+    _load(project_id)
+    try:
+        target = resolve_inside(_studio().store.project_dir(project_id), rel_path)
+    except ValueError:
+        raise HTTPException(400, "Invalid path") from None
+    if not target.is_file() or target.suffix.lower() not in DOWNLOADABLE:
+        raise HTTPException(404, "File not found")
+    media = "text/plain; charset=utf-8" if target.suffix.lower() in (".py", ".txt", ".md", ".ini", ".xml", ".csv") else None
+    return FileResponse(target, media_type=media, filename=target.name if target.suffix.lower() in (".docx", ".pdf") else None)
+
+
+class SignoffRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    role: str = Field(default="", max_length=120)
+    decision: str = Field(default="accept", pattern="^(accept|reject)$")
+    comment: str = Field(default="", max_length=2000)
+
+
+@app.post("/api/projects/{project_id}/signoff")
+async def signoff(project_id: str, payload: SignoffRequest, x_studio_token: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_token(x_studio_token)
+    _load(project_id)
+    try:
+        p = await asyncio.to_thread(_studio().signoff, project_id, Signoff(**payload.model_dump()))
+    except InputError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"summary": _summary(p), "signoffs": [s.model_dump() for s in p.signoffs]}
+
+
+# --------------------------------------------------------------------------
+# Library
+# --------------------------------------------------------------------------
+
+@app.get("/api/library")
+async def library() -> dict[str, Any]:
+    lib = _studio().library
+    docs = lib.documents() if lib else []
+    return {"documents": [
+        {"doc_id": d.doc_id, "title": d.title, "kind": d.kind, "framework": d.framework,
+         "chunks": d.chunks, "segments": d.segments, "builtin": d.builtin, "projects": len(d.projects)}
+        for d in docs
+    ]}
+
+
+@app.post("/api/library", status_code=201)
+async def add_to_library(
+    kind: str = Form(...),
+    files: list[UploadFile] = File(...),
+    x_studio_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Start an autonomous iterative research loop (background)."""
-    cfg = _config()
-    if not _llm(cfg).health():
-        raise HTTPException(500, "LLM is not healthy or unreachable.")
-    task_id = str(uuid4())
-    _bg_tasks[task_id] = {"status": "queued", "progress": "Autonomous research queued"}
-    background_tasks.add_task(
-        _run_autonomous_research_background_sync,
-        task_id, payload.topic, payload.n_iterations, payload.n_papers_per_iter, cfg,
-    )
-    return {"status": "queued", "task_id": task_id}
+    _require_token(x_studio_token)
+    if kind not in ("regulation", "concept_paper", "reference"):
+        raise HTTPException(422, "kind must be regulation, concept_paper or reference")
+    lib = _studio().library
+    if lib is None:
+        raise HTTPException(503, "Library unavailable")
+    import tempfile
 
-
-@app.get("/api/kg/summary")
-async def kg_summary() -> dict[str, Any]:
-    """Return a summary of the knowledge graph."""
-    try:
-        from kg.graph import ResearchKnowledgeGraph
-        kg = ResearchKnowledgeGraph()
-        papers = kg.find_by_type("paper")
-        findings = kg.find_by_type("finding")
-        tasks = kg.find_by_type("task")
-        return {
-            "summary": kg.summarize(),
-            "nodes": kg.G.number_of_nodes(),
-            "edges": kg.G.number_of_edges(),
-            "papers": [{"arxiv_id": p.get("arxiv_id"), "title": p.get("title"), "year": p.get("year")}
-                       for p in papers[:20]],
-            "recent_findings": [{"text": f.get("text", "")[:120], "task_id": f.get("source_task_id")}
-                                 for f in findings[-5:]],
-            "tasks": len(tasks),
-        }
-    except Exception as e:
-        raise HTTPException(500, f"Knowledge graph unavailable: {e}")
-
-
-@app.get("/api/literature/registry")
-async def literature_registry() -> dict[str, Any]:
-    """Return stats from the literature acquisition registry."""
-    try:
-        from tools.literature import registry_stats
-        return registry_stats()
-    except Exception as e:
-        raise HTTPException(500, f"Literature registry unavailable: {e}")
-
-
-@app.post("/ingest")
-async def ingest(payload: IngestRequest) -> dict[str, Any]:
-    cfg = _config()
-    try:
-        from rag.hybrid import LiteHybridRAG
-        from rag.ingest import ingest_path
-    except Exception as exc:
-        raise HTTPException(500, f"RAG ingestion unavailable: {exc}")
-
-    rag = LiteHybridRAG(
-        db_path=cfg["rag"]["db_path"],
-        collection=cfg["rag"].get("collection", "openai-embed-v1"),
-        embedding_model=cfg["rag"]["embedding_model"],
-        alpha_dense=cfg["rag"]["alpha_dense"],
-        query_expansion_enabled=cfg["rag"]["query_expansion"]["enabled"],
-        query_expansion_method=cfg["rag"]["query_expansion"]["method"],
-        max_expansions=cfg["rag"]["query_expansion"]["max_expansions"],
-        reranking_enabled=cfg["rag"]["reranking"]["enabled"],
-        reranking_model=cfg["rag"]["reranking"]["model"],
-        top_k_before_rerank=cfg["rag"]["reranking"]["top_k_before_rerank"],
-        top_k_after_rerank=cfg["rag"]["reranking"]["top_k_after_rerank"],
-    )
-    n = ingest_path(payload.path, rag, chunk_tokens=cfg["rag"]["chunk_tokens"])
-    return {"status": "ok", "chunks": len(rag), "added": n}
-
-
-@app.get("/kan-demo")
-async def kan_demo() -> dict[str, Any]:
-    result = run_kan_demo()
-    return {"status": "ok", "demo": result}
-
-
-@app.get("/runs")
-async def list_runs() -> dict[str, Any]:
-    OUTPUT_RUNS.mkdir(parents=True, exist_ok=True)
-    files = sorted(OUTPUT_RUNS.glob("run_*.json"))
-    return {"runs": [f.name for f in files]}
-
-
-@app.get("/runs/{run_id}")
-async def get_run(run_id: str) -> dict[str, Any]:
-    run_path = OUTPUT_RUNS / run_id
-    if not run_path.exists() or not run_path.is_file():
-        raise HTTPException(404, "Run file not found")
-    content = run_path.read_text(encoding="utf-8")
-    return json.loads(content)
-
-
-# New Task Management API Endpoints
-@app.get("/api/tasks")
-async def list_tasks_api(limit: int = 50, offset: int = 0, sort_by: str = "-updated_at") -> dict[str, Any]:
-    """List all tasks with pagination and sorting."""
-    try:
-        tasks, total = task_storage.list_tasks(limit=limit, offset=offset, sort_by=sort_by)
-        return {"tasks": tasks, "total": total, "limit": limit, "offset": offset}
-    except Exception as e:
-        raise HTTPException(500, f"Failed to list tasks: {str(e)}")
-
-
-@app.get("/api/tasks/{task_id}")
-async def get_task_api(task_id: str) -> dict[str, Any]:
-    """Get full task with all messages and artifacts."""
-    try:
-        task = task_storage.load_task(task_id)
-        if not task:
-            raise HTTPException(404, "Task not found")
-        
-        # Serialize task for JSON response
-        task_data = task_storage._serialize_for_json(task)
-        return {"task": task_data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Failed to load task: {str(e)}")
-
-
-@app.get("/api/tasks/search")
-async def search_tasks_api(q: str, limit: int = 20) -> dict[str, Any]:
-    """Search tasks by keyword."""
-    try:
-        results = task_storage.search_tasks(q, limit=limit)
-        return {"results": results, "query": q, "count": len(results)}
-    except Exception as e:
-        raise HTTPException(500, f"Search failed: {str(e)}")
-
-
-@app.post("/api/tasks/{task_id}/messages")
-async def add_task_message(task_id: str, payload: MessageRequest) -> dict[str, Any]:
-    """Add a user message and get assistant response."""
-    try:
-        cfg = _config()
-        llm = _llm(cfg)
-        rag = _rag(cfg)
-        
-        response, artifacts, discovered_sources = task_conversation.process_user_message(
-            task_id=task_id,
-            message_content=payload.content,
-            llm=llm,
-            rag=rag,
-            iteration=payload.iteration,
-        )
-
-        return {
-            "status": "ok",
-            "assistant_response": response,
-            "new_artifacts": artifacts,
-            "message_id": f"{task_id}_{payload.iteration}",
-            "task_id": task_id,
-            "discovered_sources": discovered_sources,
-        }
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"Failed to process message: {str(e)}")
-
-
-@app.post("/api/tasks/{task_id}/branch")
-async def branch_task_api(task_id: str, payload: BranchRequest) -> dict[str, Any]:
-    """Create a branched copy of a task."""
-    try:
-        new_task_id = task_conversation.branch_task(
-            task_id=task_id,
-            branch_name=payload.branch_name,
-            from_iteration=payload.from_iteration,
-        )
-        return {
-            "status": "ok",
-            "new_task_id": new_task_id,
-            "branch_name": payload.branch_name,
-            "parent_id": task_id,
-        }
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"Failed to branch task: {str(e)}")
-
-
-@app.post("/api/tasks/{task_id}/artifacts/{artifact_id}/re-run")
-async def re_run_artifact_api(task_id: str, artifact_id: str, payload: ReRunRequest) -> dict[str, Any]:
-    """Re-execute an artifact with edited code."""
-    try:
-        result = task_conversation.re_execute_artifact(
-            task_id=task_id,
-            artifact_id=artifact_id,
-            edited_code=payload.code,
-        )
-        return {
-            "status": "ok" if result["returncode"] == 0 else "error",
-            "stdout": result.get("stdout", ""),
-            "stderr": result.get("stderr", ""),
-            "returncode": result.get("returncode", -1),
-            "execution_time": result.get("execution_time", 0),
-        }
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"Failed to re-run artifact: {str(e)}")
-
-
-@app.post("/api/kb/approve")
-async def approve_sources(payload: ApproveSourcesRequest) -> dict[str, Any]:
-    """Ingest user-selected pending sources into the knowledge base."""
-    from tools import source_search
-    pending = source_search.load_pending_sources(payload.task_id)
-    approved_ids = set(payload.source_ids)
-    to_ingest = [s for s in pending if s.id in approved_ids]
-    if to_ingest:
-        cfg = _config()
-        rag = _rag(cfg)
-        rag.ingest_papers(to_ingest)
-    source_search.clear_pending_sources(payload.task_id)
-    return {"status": "ok", "ingested": len(to_ingest)}
-
-
-@app.post("/api/tasks/{task_id}/template")
-async def export_template_api(task_id: str) -> dict[str, Any]:
-    """Export task as a reusable template."""
-    try:
-        template_data = task_storage.export_template(task_id)
-        # Save template
-        templates_dir = Path("output") / "templates"
-        templates_dir.mkdir(parents=True, exist_ok=True)
-        template_id = str(uuid4())
-        template_file = templates_dir / f"{template_id}.json"
-        template_file.write_text(json.dumps(template_data, indent=2, default=str), encoding="utf-8")
-        
-        return {
-            "status": "ok",
-            "template_id": template_id,
-            "task_id": task_id,
-        }
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"Failed to export template: {str(e)}")
+    added = []
+    for name, content in await _read_uploads(files):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / Path(name).name
+            path.write_bytes(content)
+            try:
+                doc = await asyncio.to_thread(lib.add_document, path, kind=kind)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        added.append({"doc_id": doc.doc_id, "title": doc.title, "chunks": doc.chunks})
+    return {"added": added}

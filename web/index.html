@@ -1,430 +1,379 @@
 <!DOCTYPE html>
-<html lang="en" class="light">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Quant Research + IBKR RAG Agents</title>
+  <meta name="color-scheme" content="light dark" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Model Studio</title>
   <link rel="stylesheet" href="/static/styles.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-dark.min.css" id="prism-theme">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-latex.min.js"></script>
 </head>
 <body>
-  <!-- Sidebar -->
-  <aside id="sidebar" class="sidebar">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <aside id="sidebar" class="sidebar" aria-label="Primary">
     <div class="sidebar-header">
-      <h2>Quant Research Agents</h2>
-      <button id="sidebarToggle" class="sidebar-toggle">☰</button>
+      <span class="brand">
+        <span class="brand-mark" aria-hidden="true">MV</span>
+        <span class="nav-text brand-name">Model Studio</span>
+      </span>
+      <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true" aria-controls="sidebar">
+        <span aria-hidden="true">&laquo;</span>
+      </button>
     </div>
 
     <nav class="sidebar-nav">
-      <a href="#dashboard" class="nav-item active" data-section="dashboard">
-        <span class="nav-icon">📊</span>
-        <span class="nav-text">Dashboard</span>
+      <a href="#projects" class="nav-item" data-section="projects">
+        <span class="nav-key" aria-hidden="true">1</span><span class="nav-text">Projects</span>
       </a>
-      <a href="#tasks" class="nav-item" data-section="tasks">
-        <span class="nav-icon">💬</span>
-        <span class="nav-text">Chat</span>
+      <a href="#new" class="nav-item" data-section="new">
+        <span class="nav-key" aria-hidden="true">2</span><span class="nav-text">New project</span>
       </a>
-      <a href="#quant" class="nav-item" data-section="quant">
-        <span class="nav-icon">🧠</span>
-        <span class="nav-text">Quant Team</span>
-      </a>
-      <a href="#risk-validation" class="nav-item" data-section="risk-validation">
-        <span class="nav-icon">🏦</span>
-        <span class="nav-text">Risk Validation</span>
-      </a>
-      <a href="#reports" class="nav-item" data-section="reports">
-        <span class="nav-icon">📄</span>
-        <span class="nav-text">Reports</span>
-      </a>
-      <a href="#data" class="nav-item" data-section="data">
-        <span class="nav-icon">📈</span>
-        <span class="nav-text">Data</span>
+      <a href="#library" class="nav-item" data-section="library">
+        <span class="nav-key" aria-hidden="true">3</span><span class="nav-text">Library</span>
       </a>
       <a href="#settings" class="nav-item" data-section="settings">
-        <span class="nav-icon">⚙️</span>
-        <span class="nav-text">Settings</span>
+        <span class="nav-key" aria-hidden="true">4</span><span class="nav-text">Settings</span>
+      </a>
+      <a href="#about" class="nav-item" data-section="about">
+        <span class="nav-key" aria-hidden="true">5</span><span class="nav-text">Privacy &amp; terms</span>
       </a>
     </nav>
 
     <div class="sidebar-footer">
-      <div class="system-status">
-        <div class="status-indicator" id="statusIndicator"></div>
-        <span>System Status</span>
+      <div class="system-status" role="status" aria-live="polite">
+        <span class="status-indicator" id="statusIndicator" aria-hidden="true"></span>
+        <span class="nav-text" id="statusText">Checking system&hellip;</span>
       </div>
+      <p class="nav-text sidebar-hint">Ctrl + 1&ndash;5 switches pages</p>
     </div>
   </aside>
 
-  <!-- Main Content -->
-  <main class="main-content">
-    <!-- Header -->
+  <div class="main-content">
     <header class="header">
       <div class="header-left">
-        <button id="mobileMenuBtn" class="mobile-menu-btn">☰</button>
-        <h1 id="pageTitle">Dashboard</h1>
+        <button id="mobileMenuBtn" class="mobile-menu-btn" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">Menu</button>
+        <h1 id="pageTitle">Projects</h1>
       </div>
       <div class="header-right">
-        <button id="themeToggle" class="theme-toggle">🌙</button>
-        <div class="user-menu">
-          <button id="userMenuBtn" class="user-menu-btn">👤</button>
-        </div>
+        <button id="themeToggle" class="btn-ghost" type="button" aria-pressed="false">Dark mode</button>
       </div>
     </header>
 
-    <!-- Content Area -->
-    <div class="content-area">
-      <!-- Dashboard Section -->
-      <section id="dashboard-section" class="section active">
-        <div class="section-header">
-          <h2>Dashboard Overview</h2>
-          <p>Monitor system status and recent activity</p>
-        </div>
+    <main id="main" class="content-area" tabindex="-1">
 
-        <div class="dashboard-grid">
-          <div class="metric-card">
-            <h3>Total Runs</h3>
-            <div class="metric-value" id="totalRuns">0</div>
+      <!-- Projects -->
+      <section id="projects-section" class="section" aria-labelledby="projects-heading">
+        <div class="section-header section-header--row">
+          <div>
+            <h2 id="projects-heading">Projects</h2>
+            <p>Each project runs two agents. The Modeler designs, codes, tests and documents a model; the Validator replicates it, tests it independently and reports. Findings go back to the Modeler until nothing blocking is left or the round budget is spent.</p>
           </div>
-          <div class="metric-card">
-            <h3>Active Tasks</h3>
-            <div class="metric-value" id="activeTasks">0</div>
-          </div>
-          <div class="metric-card">
-            <h3>Reports Generated</h3>
-            <div class="metric-value" id="totalReports">0</div>
-          </div>
-          <div class="metric-card">
-            <h3>System Health</h3>
-            <div class="metric-value" id="systemHealth">Checking...</div>
-          </div>
+          <a class="btn-primary" href="#new">New project</a>
         </div>
-
-        <div class="recent-activity">
-          <h3>Recent Activity</h3>
-          <div id="activityFeed" class="activity-feed">
-            <div class="activity-item">
-              <div class="activity-icon">🔄</div>
-              <div class="activity-content">
-                <div class="activity-title">System initialized</div>
-                <div class="activity-time">Just now</div>
-              </div>
-            </div>
-          </div>
+        <div class="panel panel--flush">
+          <table class="data-table data-table--rows" aria-describedby="projects-heading">
+            <thead>
+              <tr><th scope="col">Project</th><th scope="col">Mode</th><th scope="col">Status</th><th scope="col">Outcome</th><th scope="col">Rounds</th><th scope="col">Open findings</th><th scope="col">Updated</th></tr>
+            </thead>
+            <tbody id="projectRows"><tr><td colspan="7" class="muted">Loading projects</td></tr></tbody>
+          </table>
         </div>
       </section>
 
-      <!-- Chat Section -->
-      <section id="tasks-section" class="section chat-section">
-        <div class="chat-layout">
+      <!-- New project -->
+      <section id="new-section" class="section" aria-labelledby="new-heading">
+        <div class="section-header">
+          <h2 id="new-heading">New project</h2>
+          <p>Upload data and, when you have them, the concept papers and regulations the model must follow. Documents are added to the shared library and cited by page or section.</p>
+        </div>
 
-          <!-- Left: conversation list -->
-          <div class="chat-sidebar-panel">
-            <div class="chat-sidebar-header">
-              <span class="chat-sidebar-title">Conversations</span>
-              <button id="newChatBtn" class="btn-new-chat" title="Start new conversation">+</button>
+        <form id="projectForm" class="panel form-stack" novalidate>
+          <fieldset class="mode-picker">
+            <legend>What should the agents do?</legend>
+            <label class="mode-option">
+              <input type="radio" name="mode" value="develop_and_validate" checked />
+              <span class="mode-title">Develop and validate</span>
+              <span class="mode-desc">The Modeler builds the model, its tests and the modelling document. The Validator challenges it; up to the round limit, findings go back for remediation.</span>
+            </label>
+            <label class="mode-option">
+              <input type="radio" name="mode" value="validate_external" />
+              <span class="mode-title">Validate an existing model</span>
+              <span class="mode-desc">Upload someone else's code and documentation. The Validator writes a thin adapter, replicates the stated results, runs independent tests and reports.</span>
+            </label>
+          </fieldset>
+
+          <div class="field">
+            <label for="pTitle">Title <span class="req">(required)</span></label>
+            <input id="pTitle" name="title" required maxlength="200" placeholder="Retail mortgage PD model" />
+          </div>
+          <div class="field">
+            <label for="pBrief">Brief <span class="req">(required)</span></label>
+            <textarea id="pBrief" name="brief" rows="6" required aria-describedby="pBriefHint"
+              placeholder="What the model must do, for whom, the target variable, the time horizon, constraints (interpretability, regulation), and anything the data does not show."></textarea>
+            <p id="pBriefHint" class="hint">The more specific the brief, the better the design. Mention the intended use and any thresholds your policy sets.</p>
+          </div>
+
+          <div class="upload-grid">
+            <div class="field">
+              <label for="pData">Data <span class="req">(required)</span></label>
+              <input id="pData" name="data" type="file" multiple required accept=".csv,.tsv,.parquet,.xlsx,.xls,.json" aria-describedby="pDataHint" />
+              <p id="pDataHint" class="hint">CSV, TSV, Parquet, Excel or JSON. Only a column summary and 5 sample rows are sent to the model provider.</p>
             </div>
-            <div id="conversationList" class="conversation-list">
-              <div class="conv-placeholder">No conversations yet</div>
+            <div class="field">
+              <label for="pConcept">Concept papers</label>
+              <input id="pConcept" name="concept_papers" type="file" multiple accept=".pdf,.docx,.md,.txt" aria-describedby="pConceptHint" />
+              <p id="pConceptHint" class="hint">Methodology notes, model concept papers. With these attached, the Validator also builds an independent challenger.</p>
+            </div>
+            <div class="field">
+              <label for="pRegs">Regulations and policies</label>
+              <input id="pRegs" name="regulations" type="file" multiple accept=".pdf,.docx,.md,.txt" aria-describedby="pRegsHint" />
+              <p id="pRegsHint" class="hint">Official texts, internal validation policy. Requirements are extracted and cited by page.</p>
+            </div>
+            <div class="field" id="packageField" hidden>
+              <label for="pPackage">Model package <span class="req">(required)</span></label>
+              <input id="pPackage" name="package" type="file" multiple accept=".py,.zip,.pdf,.docx,.md,.txt,.json,.yaml,.yml,.toml,.ini,.cfg" aria-describedby="pPackageHint" />
+              <p id="pPackageHint" class="hint">A zip of the code, or individual .py files, plus the model documentation.</p>
             </div>
           </div>
 
-          <!-- Right: thread + input -->
-          <div class="chat-main">
-            <div class="chat-header-bar">
-              <span id="chatTitle" class="chat-title-text">New Conversation</span>
+          <fieldset class="field">
+            <legend>Regulatory frameworks <span class="req">(generic good practice always applies)</span></legend>
+            <div id="frameworkChoices" class="check-row"></div>
+          </fieldset>
+
+          <div class="form-grid-3">
+            <div class="field" id="roundsField">
+              <label for="pRounds">Maximum rounds</label>
+              <select id="pRounds" name="max_rounds">
+                <option value="1">1 (no remediation)</option>
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="pChallenger">Challenger model</label>
+              <select id="pChallenger" name="challenger">
+                <option value="auto" selected>When concept papers or regulations are attached</option>
+                <option value="on">Always</option>
+                <option value="off">Never</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="pToken">Studio API token <span class="req">(required)</span></label>
+              <input id="pToken" type="password" autocomplete="off" required placeholder="STUDIO_API_TOKEN" />
+            </div>
+          </div>
+
+          <p class="notice">Every agent step is an OpenAI API call billed to the server's key. A develop-and-validate project with three rounds typically makes 20 to 40 calls.</p>
+          <div class="form-actions">
+            <button id="createBtn" class="btn-primary" type="submit">Start project</button>
+            <p id="createStatus" class="quant-status" role="status" aria-live="polite"></p>
+          </div>
+        </form>
+      </section>
+
+      <!-- Project detail -->
+      <section id="project-section" class="section" aria-labelledby="projectTitle">
+        <a href="#projects" class="back-link">&larr; All projects</a>
+        <div class="section-header section-header--row">
+          <div>
+            <h2 id="projectTitle">Project</h2>
+            <p id="projectMeta" class="muted"></p>
+          </div>
+          <div class="tag-row" id="projectTags"></div>
+        </div>
+
+        <div id="projectError" class="notice notice--bad" role="alert" hidden></div>
+
+        <div class="project-grid">
+          <div class="project-main">
+            <div class="panel">
+              <h3>Rounds</h3>
+              <ol id="roundList" class="round-list"></ol>
             </div>
 
-            <div id="chatThread" class="chat-thread">
-              <div class="chat-welcome" id="chatWelcome">
-                <div class="welcome-icon">⚡</div>
-                <h3>Start a research task</h3>
-                <p>Ask anything — financial models, trading strategies, ML experiments, academic writing.</p>
-                <div class="welcome-examples">
-                  <button class="example-chip" onclick="setInput('Backtest a 50/200 SMA crossover on SPY, QQQ, IWM')">SMA crossover backtest</button>
-                  <button class="example-chip" onclick="setInput('Compute the volatility of SPY over 2020-2024 with bootstrap CIs')">SPY volatility analysis</button>
-                  <button class="example-chip" onclick="setInput('Build an LSTM model to forecast AAPL weekly returns')">LSTM return forecast</button>
-                  <button class="example-chip" onclick="setInput('Write a 3-page report on momentum factor anomalies')">Momentum factor report</button>
-                  <button class="example-chip" onclick="setInput('Implement a C++ order book with microsecond latency benchmark')">C++ HFT order book</button>
+            <div class="panel">
+              <div class="panel-head">
+                <h3>Findings</h3>
+                <div class="seg" role="group" aria-label="Filter findings">
+                  <button type="button" class="seg-btn" data-filter="open" aria-pressed="true">Open</button>
+                  <button type="button" class="seg-btn" data-filter="all" aria-pressed="false">All</button>
                 </div>
               </div>
+              <div id="findingList"></div>
             </div>
 
-            <div class="chat-input-bar">
-              <textarea id="chatInput" class="chat-textarea" placeholder="Describe your analysis task or ask a follow-up question..." rows="2"></textarea>
-              <button id="sendBtn" class="btn-send" onclick="sendMessage()">
-                <span id="sendBtnText">Send</span>
-              </button>
+            <div class="panel" id="signoffPanel" hidden>
+              <h3>Human sign-off</h3>
+              <p class="hint">The outcome above is set by rules from the findings. Only a qualified person can accept or reject the model. Your name and role are written into the final validation report.</p>
+              <form id="signoffForm" class="form-stack" novalidate>
+                <div class="form-grid-3">
+                  <div class="field">
+                    <label for="soName">Name <span class="req">(required)</span></label>
+                    <input id="soName" autocomplete="name" required />
+                  </div>
+                  <div class="field">
+                    <label for="soRole">Role</label>
+                    <input id="soRole" placeholder="Head of model validation" />
+                  </div>
+                  <div class="field">
+                    <label for="soDecision">Decision</label>
+                    <select id="soDecision">
+                      <option value="accept">Accept</option>
+                      <option value="reject">Reject</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="soComment">Comment</label>
+                  <textarea id="soComment" rows="2"></textarea>
+                </div>
+                <button class="btn-danger" type="submit" id="signoffBtn">Record sign-off</button>
+                <p id="signoffStatus" class="quant-status" role="status" aria-live="polite"></p>
+              </form>
+              <ul id="signoffList" class="plain-list"></ul>
             </div>
-          </div>
-
-        </div>
-      </section>
-
-      <!-- Quant Team Section -->
-      <section id="quant-section" class="section">
-        <div class="section-header">
-          <h2>Quant Research + IBKR Agent Team</h2>
-          <p>RAG evidence → hosted free-model research → model/backtest → risk gates → paper-order approval</p>
-        </div>
-
-        <div class="quant-run-card">
-          <label for="quantTask">Research objective</label>
-          <textarea id="quantTask" rows="4" placeholder="Research a conservative SPY momentum strategy with walk-forward validation"></textarea>
-
-          <div class="quant-auth-row">
-            <div>
-              <label for="traderApiToken">Trading API token</label>
-              <input id="traderApiToken" type="password" autocomplete="off" placeholder="TRADER_API_TOKEN" />
-              <small>Used for this request only; it is not saved by the browser.</small>
+            <div class="panel">
+              <details id="requirementDetails">
+                <summary><span class="h3-like">Requirement coverage</span> <span id="requirementSummary" class="muted"></span></summary>
+                <div id="requirementTable"></div>
+              </details>
             </div>
-            <button id="runQuantBtn" class="btn-primary">Run agent team</button>
-          </div>
-          <div id="quantRunStatus" class="quant-status">Ready. Running the team never submits an order.</div>
-        </div>
 
-        <div id="quantResult" class="quant-result" hidden>
-          <div class="quant-result-header">
-            <div>
-              <span class="quant-label">Run</span>
-              <strong id="quantRunId"></strong>
+          </div>
+
+          <div class="project-side">
+            <div class="panel">
+              <h3>Documents</h3>
+              <ul id="docList" class="plain-list"></ul>
             </div>
-            <span id="quantDecisionBadge" class="quant-badge"></span>
-          </div>
-
-          <div class="quant-grid">
-            <article class="quant-panel">
-              <h3>Agent trace</h3>
-              <div id="quantTrace" class="agent-trace"></div>
-            </article>
-            <article class="quant-panel">
-              <h3>Grounded research</h3>
-              <div id="quantResearch"></div>
-            </article>
-            <article class="quant-panel">
-              <h3>Strategy + backtest</h3>
-              <div id="quantStrategy"></div>
-            </article>
-            <article class="quant-panel">
-              <h3>Risk + IBKR preview</h3>
-              <div id="quantRisk"></div>
-              <button id="executeQuantBtn" class="btn-danger" hidden>Approve exact paper order</button>
-              <div id="quantExecutionStatus" class="quant-execution-status"></div>
-            </article>
-          </div>
-        </div>
-      </section>
-
-      <!-- Risk Validation Section -->
-      <section id="risk-validation-section" class="section">
-        <div class="section-header">
-          <h2>Bank Risk Validation Agent Team</h2>
-          <p>Credit / non-credit / model risk validation — DRAFT reports for human validator review, not a regulatory submission</p>
-        </div>
-
-        <div class="quant-run-card">
-          <div class="risk-disclaimer">
-            ⚠️ Draft-and-support tool only. Regulatory references and thresholds are placeholder/illustrative
-            and have not been verified against ECB/EBA/MNB source documents. Nothing here may be submitted
-            to a regulator without human validator sign-off.
-          </div>
-
-          <label for="riskDomain">Validation domain</label>
-          <select id="riskDomain">
-            <option value="credit_risk">Credit risk</option>
-            <option value="non_credit_risk">Non-credit risk (market / operational / liquidity)</option>
-            <option value="model_risk">Model risk</option>
-          </select>
-
-          <label for="riskInputs">Case file (JSON, matching the selected domain's schema)</label>
-          <textarea id="riskInputs" rows="10" placeholder='{"model_id":"PD-RETAIL-01","model_type":"PD","exposure_class":"retail","portfolio_segment":"mortgages","estimation_approach":"internal_ratings_based","population_stability_index":0.3,"gini_coefficient":0.35,"backtesting_exceptions_count":10,"backtesting_observations_count":100,"override_rate_pct":0.15}'></textarea>
-
-          <div class="quant-auth-row">
-            <div>
-              <label for="riskApiToken">Risk Validation API token</label>
-              <input id="riskApiToken" type="password" autocomplete="off" placeholder="RISK_VALIDATION_API_TOKEN" />
-              <small>Used for this request only; it is not saved by the browser.</small>
+            <div class="panel">
+              <h3>Agent activity</h3>
+              <ol id="traceLog" class="trace-log" aria-live="polite"></ol>
             </div>
-            <button id="runRiskValidationBtn" class="btn-primary">Run validation</button>
-          </div>
-          <div id="riskRunStatus" class="quant-status">Ready. Produces a draft report only.</div>
-        </div>
-
-        <div id="riskResult" class="quant-result" hidden>
-          <div class="quant-result-header">
-            <div>
-              <span class="quant-label">Run</span>
-              <strong id="riskRunId"></strong>
-            </div>
-            <span id="riskRatingBadge" class="quant-badge"></span>
-          </div>
-
-          <div class="quant-grid">
-            <article class="quant-panel">
-              <h3>Agent trace</h3>
-              <div id="riskTrace" class="agent-trace"></div>
-            </article>
-            <article class="quant-panel">
-              <h3>Findings</h3>
-              <div id="riskFindings"></div>
-            </article>
-            <article class="quant-panel">
-              <h3>Draft downloads</h3>
-              <div class="risk-downloads">
-                <a id="riskDownloadPptx" class="btn-secondary" href="#" target="_blank">PPTX</a>
-                <a id="riskDownloadPdf" class="btn-secondary" href="#" target="_blank">PDF</a>
-                <a id="riskDownloadDocx" class="btn-secondary" href="#" target="_blank">DOCX</a>
-              </div>
-              <small>Draft downloads are watermarked "DRAFT" and carry no sign-off until approved below.</small>
-            </article>
-            <article class="quant-panel">
-              <h3>Approve & sign off</h3>
-              <label for="riskSignedOffBy">Validator name</label>
-              <input id="riskSignedOffBy" type="text" placeholder="Jane Validator" />
-              <button id="approveRiskValidationBtn" class="btn-danger">Approve & sign off</button>
-              <div id="riskApprovalStatus" class="quant-execution-status"></div>
-            </article>
-          </div>
-        </div>
-      </section>
-
-      <!-- Reports Section -->
-      <section id="reports-section" class="section">
-        <div class="section-header">
-          <h2>Report Viewer</h2>
-          <p>View generated reports and analysis outputs</p>
-        </div>
-
-        <div class="reports-controls">
-          <div class="reports-filters">
-            <select id="reportTypeFilter">
-              <option value="all">All Reports</option>
-              <option value="latex">LaTeX Reports</option>
-              <option value="data">Data Files</option>
-              <option value="plots">Plots</option>
-            </select>
-            <input type="text" id="reportSearch" placeholder="Search reports...">
-          </div>
-          <button id="refreshReportsBtn" class="btn-secondary">Refresh</button>
-        </div>
-
-        <div class="reports-grid">
-          <div class="reports-list">
-            <h3>Available Reports</h3>
-            <div id="reportsList" class="file-list">
-              <!-- Report files will be listed here -->
-            </div>
-          </div>
-          <div class="report-viewer">
-            <div id="reportViewer" class="viewer-content">
-              <div class="viewer-placeholder">
-                <div class="placeholder-icon">📄</div>
-                <div class="placeholder-text">Select a report to view</div>
-              </div>
+            <div class="panel">
+              <details>
+                <summary>All files</summary>
+                <ul id="fileList" class="plain-list file-tree"></ul>
+              </details>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- Data Section -->
-      <section id="data-section" class="section">
+      <!-- Library -->
+      <section id="library-section" class="section" aria-labelledby="library-heading">
         <div class="section-header">
-          <h2>Data Management</h2>
-          <p>Configure data sources and manage ingestion</p>
+          <h2 id="library-heading">Library</h2>
+          <p>Regulations, concept papers and reference texts shared by all projects. Built-in entries are short summaries; attach the official texts for article-level citations.</p>
         </div>
-
-        <div class="data-sources">
-          <h3>Data Sources</h3>
-          <div class="source-grid">
-            <div class="source-card">
-              <h4>Yahoo Finance</h4>
-              <p>Stock price data</p>
-              <div class="source-status status-active">Active</div>
+        <form id="libraryForm" class="panel form-stack" novalidate>
+          <h3>Add documents</h3>
+          <div class="form-row form-row--3">
+            <div class="field">
+              <label for="libFiles">Files <span class="req">(required)</span></label>
+              <input id="libFiles" type="file" multiple required accept=".pdf,.docx,.md,.txt" />
             </div>
-            <div class="source-card">
-              <h4>FRED</h4>
-              <p>Federal Reserve macro data</p>
-              <div class="source-status status-active">Active</div>
+            <div class="field">
+              <label for="libKind">Type</label>
+              <select id="libKind">
+                <option value="regulation">Regulation or policy</option>
+                <option value="concept_paper">Concept paper</option>
+                <option value="reference">Reference</option>
+              </select>
             </div>
-            <div class="source-card">
-              <h4>Ken French</h4>
-              <p>Factor portfolios (FF3, FF5, Mom)</p>
-              <div class="source-status status-active">Active</div>
-            </div>
-            <div class="source-card">
-              <h4>OpenAlex</h4>
-              <p>250M+ academic works</p>
-              <div class="source-status status-active">Active</div>
-            </div>
-            <div class="source-card">
-              <h4>KSH (Hungary)</h4>
-              <p>Economic indicators</p>
-              <div class="source-status status-inactive">Not Implemented</div>
-            </div>
-            <div class="source-card">
-              <h4>MNB (Hungary)</h4>
-              <p>Financial data</p>
-              <div class="source-status status-inactive">Not Implemented</div>
-            </div>
-            <div class="source-card">
-              <h4>Eurostat</h4>
-              <p>European statistics</p>
-              <div class="source-status status-inactive">Not Implemented</div>
-            </div>
+            <button class="btn-primary" type="submit" id="libBtn">Add to library</button>
           </div>
-        </div>
-
-        <div class="ingestion-controls">
-          <h3>Document Ingestion</h3>
-          <div class="ingest-form">
-            <input id="ingestPath" type="text" placeholder="Path to file or folder, e.g. data/papers/" />
-            <button id="ingestBtn" class="btn-primary">Ingest</button>
-          </div>
-          <div class="ingest-output">
-            <pre id="ingestOutput">Ready to ingest documents...</pre>
-          </div>
+          <p id="libStatus" class="quant-status" role="status" aria-live="polite"></p>
+        </form>
+        <div class="panel panel--flush">
+          <table class="data-table">
+            <thead><tr><th scope="col">Document</th><th scope="col">Type</th><th scope="col">Framework</th><th scope="col">Chunks</th><th scope="col">Used by</th></tr></thead>
+            <tbody id="libraryRows"></tbody>
+          </table>
         </div>
       </section>
 
-      <!-- Settings Section -->
-      <section id="settings-section" class="section">
-        <div class="section-header">
-          <h2>Settings</h2>
-          <p>Configure system preferences and options</p>
-        </div>
-
+      <!-- Settings -->
+      <section id="settings-section" class="section" aria-labelledby="settings-heading">
+        <div class="section-header"><h2 id="settings-heading">Settings</h2></div>
         <div class="settings-grid">
-          <div class="settings-group">
+          <div class="panel">
             <h3>Appearance</h3>
-            <div class="setting-item">
+            <div class="field">
               <label for="themeSelect">Theme</label>
               <select id="themeSelect">
                 <option value="light">Light</option>
                 <option value="dark">Dark</option>
-                <option value="auto">Auto</option>
+                <option value="auto">Match system</option>
               </select>
             </div>
           </div>
-
-          <div class="settings-group">
-            <h3>System</h3>
-            <p class="setting-note">Inference is hosted by OpenRouter. The default chat and embedding routes are free.</p>
-            <div class="setting-item">
-              <button id="healthCheckBtn" class="btn-secondary">Run Health Check</button>
-              <div id="healthStatus" class="health-status">Click to check system health</div>
+          <div class="panel">
+            <h3>Studio API token</h3>
+            <p class="setting-note">Needed to start projects, add library documents and sign off. Kept in this browser tab only and cleared when the tab closes.</p>
+            <div class="field">
+              <label for="settingsToken">Token</label>
+              <input id="settingsToken" type="password" autocomplete="off" placeholder="STUDIO_API_TOKEN" />
             </div>
+            <button id="forgetToken" class="btn-secondary" type="button">Forget token</button>
+          </div>
+          <div class="panel">
+            <h3>Model provider</h3>
+            <p class="setting-note">The agents call the OpenAI API with the key set on the server. Every call is billed to that account.</p>
+            <button id="healthCheckBtn" class="btn-secondary" type="button">Run health check</button>
+            <p id="healthStatus" class="health-status" role="status" aria-live="polite">Not checked yet.</p>
           </div>
         </div>
       </section>
-    </div>
-  </main>
 
-  <!-- Modals and Overlays -->
-  <div id="modalOverlay" class="modal-overlay"></div>
+      <!-- Privacy & terms -->
+      <section id="about-section" class="section prose" aria-labelledby="about-heading">
+        <div class="section-header">
+          <h2 id="about-heading">Privacy and terms of use</h2>
+          <p>This is a self-hosted tool. It has no user accounts, sells nothing and runs no analytics.</p>
+        </div>
+        <div class="panel">
+          <h3>What data leaves this machine</h3>
+          <ul>
+            <li><strong>OpenAI API</strong>: the brief, a summary of each data table (column names, types, statistics and 5 sample rows), passages from library documents, generated code and test output. OpenAI's terms and data policy apply to that traffic.</li>
+            <li><strong>Nothing else.</strong> Generated model code runs locally with no API keys in its environment. The full datasets are read only by that local code.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>What is stored</h3>
+          <ul>
+            <li>Projects, uploaded data, generated code, test results and documents are saved under <code>output/studio/</code> on the server.</li>
+            <li>Documents you attach are copied into the shared library (<code>output/library/</code>) and indexed so later projects can cite them.</li>
+            <li>Names and roles entered at sign-off are written into the validation report and the project record.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Cookies and browser storage</h3>
+          <p>The app sets no cookies and loads no third-party scripts, fonts or trackers. Your browser keeps the theme, sidebar state and last page in local storage, and the API token in session storage for the current tab only. These are needed for the interface to work, so no consent banner is required.</p>
+        </div>
+        <div class="panel">
+          <h3>Terms of use</h3>
+          <ul>
+            <li>Models, code, tests and documents are produced by language models and can be wrong. A qualified developer and an independent validator must review them.</li>
+            <li>The validation outcome is a rule-based summary of findings, not an approval. Only the recorded human sign-off is a decision, and it remains your institution's responsibility.</li>
+            <li>Built-in regulatory summaries are not the legal texts. Attach official texts for anything you rely on.</li>
+            <li>Nothing here is investment advice. Backtests are hypothetical.</li>
+            <li>Generated code runs on this machine with your user's permissions. Run the server in an environment you are comfortable executing untrusted code in.</li>
+            <li>Upload only data and documents you are allowed to process and to send (in summary form) to OpenAI.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Your rights under GDPR</h3>
+          <p>If the data you upload contains personal data, you are the controller. Prefer pseudonymised data. People can ask you to see, correct or delete records under <code>output/</code> that concern them. Add your contact details here before sharing the app.</p>
+        </div>
+      </section>
+    </main>
+  </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>

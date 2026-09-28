@@ -2,24 +2,16 @@
 set -euo pipefail
 
 echo "[1/3] Creating Python environment..."
-if [ ! -d .venv ]; then
-  python3 -m venv .venv
-fi
-
+[ -d .venv ] || python3 -m venv .venv
 PYTHON=".venv/bin/python"
-echo "[2/3] Installing dependencies (no local model runtime)..."
+
+echo "[2/3] Installing dependencies..."
 "$PYTHON" -m pip install --upgrade pip
 "$PYTHON" -m pip install -r requirements.txt
 
-echo "[3/3] Checking OpenRouter..."
-BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
-BASE_URL="${BASE_URL%/}"
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  echo "  Set OPENROUTER_API_KEY to use hosted free models."
-elif curl -fsS --max-time 8 -H "Authorization: Bearer ${OPENROUTER_API_KEY}" "$BASE_URL/key" >/dev/null; then
-  echo "  OpenRouter is reachable at $BASE_URL"
-else
-  echo "  OpenRouter is not reachable or authorized at $BASE_URL"
-fi
+echo "[3/3] Checking configuration..."
+[ -n "${OPENAI_API_KEY:-}" ] || echo "  Set OPENAI_API_KEY (billed OpenAI account)."
+[ -n "${STUDIO_API_TOKEN:-}" ] || echo "  Set STUDIO_API_TOKEN to enable starting projects and sign-off."
+command -v soffice >/dev/null || echo "  LibreOffice (soffice) not found: documents will be DOCX only."
 
-echo "Setup complete. Run: .venv/bin/python run.py --healthcheck"
+echo "Setup complete. Run: .venv/bin/uvicorn server:app  (then open http://127.0.0.1:8000)"
